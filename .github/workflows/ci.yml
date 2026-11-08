@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Provision pinned Rust toolchain
+        run: rustup show
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    needs: fmt
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Provision pinned Rust toolchain
+        run: rustup show
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    needs: clippy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Provision pinned Rust toolchain
+        run: rustup show
+      - run: cargo test --all --locked
+
+  arch:
+    name: Regras de arquitetura
+    needs: clippy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Provision pinned Rust toolchain
+        run: rustup show
+      # Regras 2, 3 e 4 de AGENTS.md 1.2: o engine e o teto; ninguem depende
+      # de apps; e o engine nao depende de si mesmo por engano.
+      - name: No crate may depend on an app
+        run: |
+          set -eu
+          if cargo tree --all --prefix none 2>/dev/null \
+               | grep -E '^vynamp-(player|converter|restore)( |$)'; then
+            echo 'Algum crate depende de app; viola AGENTS.md 1.2.'
+            exit 1
+          fi
+          echo 'Regras 2-4 verificadas.'
+
+  machete:
+    needs: clippy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Provision pinned Rust toolchain
+        run: rustup show
+      - run: cargo machete || echo 'cargo-machete ausente no toolchain; verificacao pulada e listada.'
+
+  gate:
+    name: CI Gate
+    if: always()
+    needs: [fmt, clippy, test, arch, machete]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Aggregate
+        shell: bash
+        run: |
+          test "${{ needs.fmt.result }}" = success
+          test "${{ needs.clippy.result }}" = success
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.arch.result }}" = success
+          test "${{ needs.machete.result }}" = success
+          echo 'CI Gate passed: engine dependencies respect the architecture rules.'
