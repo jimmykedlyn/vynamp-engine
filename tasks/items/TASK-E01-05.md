@@ -40,9 +40,9 @@ Mixer PCM, EOF drain, ramp play/stop e relógio de saída.
 
 | ID | Given | When | Then |
 |---|---|---|---|
-| `TASK-E01-05-AC-1` | PENDENTE | PENDENTE | Fim não corta frames |
-| `TASK-E01-05-AC-2` | PENDENTE | PENDENTE | pause/stop não deixam áudio antigo em próximo play |
-| `TASK-E01-05-AC-3` | PENDENTE | PENDENTE | volumes default não amplificam. A/B usa ticks/frames válidos sem drift e encerra ao trocar fonte. |
+| `TASK-E01-05-AC-1` | uma faixa cujo frame count não é múltiplo do período negociado do dispositivo | a reprodução chega ao EOF e o engine drena até o último frame de conteúdo | Fim não corta frames |
+| `TASK-E01-05-AC-2` | a reprodução pausada com samples ainda no ring e buffers de decode em voo | o usuário dá Stop, abre outra faixa e dá Play | pause/stop não deixam áudio antigo em próximo play |
+| `TASK-E01-05-AC-3` | duas fontes iguais por construção (o mesmo arquivo copiado duas vezes) e o volume default em 100% | o A/B alterna entre elas por 60 s e compara posição em ticks, frames apresentados e clock do dispositivo | volumes default não amplificam. A/B usa ticks/frames válidos sem drift e encerra ao trocar fonte. |
 
 ## Verificação
 

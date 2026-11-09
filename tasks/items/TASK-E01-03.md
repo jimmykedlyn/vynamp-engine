@@ -40,9 +40,9 @@ Domain playback states, commands/events e cancellation tokens.
 
 | ID | Given | When | Then |
 |---|---|---|---|
-| `TASK-E01-03-AC-1` | PENDENTE | PENDENTE | Stop durante Opening cancela tudo |
-| `TASK-E01-03-AC-2` | PENDENTE | PENDENTE | seek/troca descarta buffers antigos |
-| `TASK-E01-03-AC-3` | PENDENTE | PENDENTE | repeated stop é idempotente. |
+| `TASK-E01-03-AC-1` | a state machine em Opening com o produtor de decode emitindo buffers e os workers de I/O vivos | um comando Stop chega antes do primeiro buffer entrar no ring e o teste espera todos os workers terminarem | Stop durante Opening cancela tudo |
+| `TASK-E01-03-AC-2` | a reprodução em Playing com dois buffers da geração 1 já publicados no ring | um seek incrementa a geração para 2 e o consumidor drena o ring até o último frame | seek/troca descarta buffers antigos |
+| `TASK-E01-03-AC-3` | o estado já em Idle depois de um Stop ter sido aplicado | o comando Stop é enviado três vezes seguidas e o contador de eventos do domínio é lido | repeated stop é idempotente. |
 
 ## Verificação
 

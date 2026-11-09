@@ -40,9 +40,9 @@ EQ gráfico clássico, preamp, volume/pan e RG track/album.
 
 | ID | Given | When | Then |
 |---|---|---|---|
-| `TASK-E04-01-AC-1` | PENDENTE | PENDENTE | On/off/flat coerentes |
-| `TASK-E04-01-AC-2` | PENDENTE | PENDENTE | metadata absent usa ganho configurado |
-| `TASK-E04-01-AC-3` | PENDENTE | PENDENTE | coefficient swap sem zipper e sem allocRT. |
+| `TASK-E04-01-AC-1` | o EQ de dez bandas com o perfil de dispositivo carregado | o EQ é ligado, desligado e posto em flat, e a resposta em frequência de cada estado é medida | On/off/flat coerentes |
+| `TASK-E04-01-AC-2` | uma faixa sem tags ReplayGain e o preamp configurado | o playback aplica ReplayGain track e album e a saída é medida contra a referência | metadata absent usa ganho configurado |
+| `TASK-E04-01-AC-3` | o EQ tocando sob a carga de callback do spike de E01-02 | os coeficientes são trocados pelo soquete de controle no meio da reprodução | coefficient swap sem zipper e sem allocRT. |
 
 ## Verificação
 
