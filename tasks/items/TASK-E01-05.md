@@ -1,9 +1,8 @@
 # TASK-E01-05 — Implementar mixer, drain e transições básicas
 
 > Gerado pelo passo 37 a partir de `tasks/backlog.json`. Os campos de estado vêm do
-> backlog e não devem ser editados aqui. Critério de aceite: **PENDENTE** de autoria —
-> a coluna `Then` é o requisito aprovado, copiado literal; `Given` e `When` ainda
-> não existem.
+> backlog e não devem ser editados aqui. A coluna `Then` é o requisito aprovado,
+> copiado literal do backlog; `Given` e `When` foram autorados na execução.
 
 | Campo | Valor |
 |---|---|
@@ -27,7 +26,25 @@ Mixer PCM, EOF drain, ramp play/stop e relógio de saída.
 
 ## Boundary
 
-<!-- PENDENTE: o que esta TASK não faz, mesmo parecendo relacionado. -->
+- **Não** implementa o grafo DSP nem crossfade de efeitos. O mixer aqui soma streams
+  PCM e faz ramp de play/stop; `Compiled graph`, interpolação de parâmetro e crossfade
+  equal-power entre cadeias são `TASK-E04-03`.
+- **Não** faz gapless sample-accurate. O dreno de EOF garante que o último frame de
+  conteúdo chega ao dispositivo; predecode da próxima faixa e trim de encoder
+  delay/padding são `TASK-E01-06`. Drenar sem corte não é emendar duas faixas.
+- **Não** conserta o viés do relógio do spike de `TASK-E01-02` por redesenho de contrato.
+  A semântica `presented` já está na spec; esta TASK entrega o dreno que faz
+  `presented` alcançar `content_frames` no fim, em vez de estabilizar em
+  `content_frames − latency_frames`.
+- **Não** aplica EQ, ganho, pan ou ReplayGain. O mixer soma no nível que recebe; a cadeia
+  de processamento por stream é `TASK-E04-01`, que depende desta TASK justamente porque
+  precisa de um grafo estável para pendurar os nós.
+- **Não** escolhe backend, negocia formato nem reabre dispositivo em troca de sample
+  rate. Amostragem, exclusividade e perfis de dispositivo são da `vynamp-output`
+  (`TASK-E04-05`); se a troca de taxa quebra o período negociado, isso é limitação
+  reportada, não resolvida aqui.
+- **Não** arredonda nem dither. O contador de frames é exato em `u64` e o último frame de
+  conteúdo é entregue como está; conversão de bit depth e dither são da `TASK-E04-02`.
 
 ## Antes de começar
 
@@ -48,9 +65,9 @@ Mixer PCM, EOF drain, ramp play/stop e relógio de saída.
 
 | Item | Comando / fixture | Evidência esperada |
 |---|---|---|
-| Teste automatizado | `cargo test` no repo `vynamp-engine` | verde no CI Gate |
-| Oráculo independente | PENDENTE | comparação numérica, não "parece certo" |
-| Hardware | PENDENTE | ausência é limitação registrada, não aprovação |
+| Teste automatizado | `cargo test` no repo `vynamp-engine`, com a fixture de faixa cujo frame count não é múltiplo do período negociado (AC-1), o roteiro pause→stop→outra faixa→play (AC-2) e o A/B de 60 s entre duas cópias do mesmo arquivo (AC-3) | verde no CI Gate, e a contagem de frames drenados igual ao frames restantes depois do EOF, sem truncar o último período |
+| Oráculo independente | os dois JSON de `evidence/PR/task-e01-02/` (`probe-steady.json` e `probe-stall.json`), comparando a posição apresentada final com o conteúdo produzido: hoje 11 507 474 e 11 507 560 contra 11 520 000 de conteúdo; mais `sox --i` ou `ffprobe -show_streams` sobre o arquivo de A/B para fixar o frame count de referência | as duas posições finais sobem para 11 520 000 e o A/B termina sem drift — valores lidos dos JSON e do relatório, não "parece certo"; enquanto o dreno não existir, os dois números continuam abaixo do conteúdo |
+| Hardware | necessário para AC-3 e para a posição real: a medição de referência foi em WASAPI shared, `Headset (USB 384KZ HIFI Audio)`, 384 000 Hz, 2 canais, buffer 3 840 frames; aqui não há dispositivo algum | ausência é limitação registrada, não aprovação: sem dispositivo o teste roda em backend de teste e prova dreno e ramp, não a taxa do relógio |
 
 ## DoD — pronto para review
 

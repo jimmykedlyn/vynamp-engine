@@ -1,9 +1,8 @@
 # TASK-E01-03 — Implementar state machine e generation cancellation
 
 > Gerado pelo passo 37 a partir de `tasks/backlog.json`. Os campos de estado vêm do
-> backlog e não devem ser editados aqui. Critério de aceite: **PENDENTE** de autoria —
-> a coluna `Then` é o requisito aprovado, copiado literal; `Given` e `When` ainda
-> não existem.
+> backlog e não devem ser editados aqui. A coluna `Then` é o requisito aprovado,
+> copiado literal do backlog; `Given` e `When` foram autorados na execução.
 
 | Campo | Valor |
 |---|---|
@@ -27,7 +26,26 @@ Domain playback states, commands/events e cancellation tokens.
 
 ## Boundary
 
-<!-- PENDENTE: o que esta TASK não faz, mesmo parecendo relacionado. -->
+- **Não** produz nem mistura uma única amostra. Esta TASK entrega o domínio — estados,
+  comandos, eventos e tokens de cancelamento; o ring, o mixer PCM e o dreno de EOF são
+  `TASK-E01-05`. Uma state machine verde não prova que o áudio saiu.
+- **Não** abre o dispositivo, não negocia formato e não publica o relógio. A latência e a
+  posição apresentada são medidas pela callback de `vynamp-output`, fixadas no spike de
+  `TASK-E01-02`; aqui só se consome o que ela informa. Sem `vynamp-output` no teste, o
+  relógio é falso de propósito.
+- **Não** implementa seek de verdade. Incrementar a geração e recusar buffer de geração
+  velha é desta TASK; resolver tempo→byte/frame, priming e preskip é do `vynamp-decode`
+  (`TASK-E01-04`, `TASK-E17-02`). Um seek que só incrementa geração não reposiciona
+  decodificador nenhum.
+- **Não** decide gapless nem trim de encoder delay/padding. `TASK-E01-06` é dona do
+  predecode da próxima faixa e do corte validado; aqui só se garante que a troca de faixa
+  invalida a geração anterior.
+- **Não** desenha a recuperação de dispositivo (`Reconnecting`, `DeviceLost`, `Error`) nem
+  o soak. O caminho coberto é `Idle → Opening → Buffering → Playing ↔ Paused → Seeking →
+  Stopping → Idle`; recovery fica em `TASK-E01-10`, e erro de backend chega como evento
+  que esta TASK só transporta.
+- **Não** persiste estado nem expõe comandos à UI. Ligar commands/events aos painéis
+  clássicos é `TASK-E02-03`; não há nada entre sessões para guardar.
 
 ## Antes de começar
 
@@ -48,9 +66,9 @@ Domain playback states, commands/events e cancellation tokens.
 
 | Item | Comando / fixture | Evidência esperada |
 |---|---|---|
-| Teste automatizado | `cargo test` no repo `vynamp-engine` | verde no CI Gate |
-| Oráculo independente | PENDENTE | comparação numérica, não "parece certo" |
-| Hardware | PENDENTE | ausência é limitação registrada, não aprovação |
+| Teste automatizado | `cargo test` no repo `vynamp-engine`, com as três suítes de AC-1..AC-3: Stop em `Opening`, seek que incrementa a geração no ring, e Stop repetido três vezes | verde no CI Gate, com os três testes nomeados no relatório — não um teste genérico de estado |
+| Oráculo independente | contador do consumidor de teste, escrito no harness e não no domínio, somando os frames que ele de fato retirou do ring; a expectativa vem do número de buffers que a fixture declarou produzir por geração, não do que a state machine relata | depois do seek de AC-2 o consumidor soma exatamente os buffers da geração 2 e nenhum da geração 1; depois do 1º Stop de AC-3 o número de eventos aplicados é 1 e o 2º e o 3º não o movem — dois contadores contados fora do código sob teste, não "parece certo" |
+| Hardware | nenhum nesta TASK: o domínio é determinístico e roda em processo, mas a corretude de `presented` depende do `vynamp-output`, cuja medição real foi feita na `TASK-E01-02` em WASAPI shared | ausência é limitação registrada, não aprovação: sem a callback real, o teste de geração prova descarte, não audibilidade |
 
 ## DoD — pronto para review
 
