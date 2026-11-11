@@ -10,6 +10,8 @@ dependencies. The only crate that knows `vynamp-decode`, `vynamp-encode`,
 > module specification, its task list and the tooling both are built with. It ships no
 > running code and makes no measured claim.
 
+**Specs:** every file in [`specs/`](specs/) is at v0.2.0, an authored draft not yet approved by the maintainer. No number in them is a contract until it is approved.
+
 Licence: `MIT OR Apache-2.0` — see [LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT) and
 [LICENSE-APACHE](LICENSE-APACHE).
 Security: [GitHub Security Advisories](https://github.com/jimmykedlyn/vynamp-engine/security/advisories/new)
@@ -57,6 +59,8 @@ crates.io. O único crate que conhece `vynamp-decode`, `vynamp-encode`,
 > **Estado: especificação.** Esta biblioteca não está implementada. O repositório contém
 > a especificação do módulo, a lista de tarefas dele e o tooling com que os dois são
 > construídos. Não entrega código em execução e não afirma resultado medido.
+
+**Specs:** todos os arquivos em [`specs/`](specs/) estão em v0.2.0, rascunho autorado ainda não aprovado pelo mantenedor. Nenhum número neles é contrato antes da aprovação.
 
 Licença: `MIT OR Apache-2.0` — ver [LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT) e
 [LICENSE-APACHE](LICENSE-APACHE).
