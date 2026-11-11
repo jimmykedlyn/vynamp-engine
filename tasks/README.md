@@ -1,6 +1,10 @@
 # tasks — vynamp-engine
 
-15tarefa(s) do backlog de produto com este repo como dono.
+
+15 tarefa(s) do backlog com este repositório como dono.
+13 são de produto e 2 de engenharia, emitidas pelo passo 37
+(D-37-13) e ausentes do backlog de produto: `TASK-E19-03`, `TASK-E19-07`.
+
 
 | ID | Título | Módulo dono | Estado |
 |---|---|---|---|
