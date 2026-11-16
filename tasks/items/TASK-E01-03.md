@@ -10,7 +10,7 @@
 | Módulo dono | `vynamp-engine` |
 | Repo | `jimmykedlyn/vynamp-engine` |
 | REQ coberto | `REQ-E01-03` |
-| Critérios da spec | pendente — `specs/engine.md` §5 |
+| Critérios da spec | `specs/engine.md` §5 (`ENGINE-AC-02` a `ENGINE-AC-05` — rascunho não aprovado) |
 | Fase | M1 |
 | Prioridade | P0 |
 | Estado | planned |
