@@ -7,7 +7,7 @@
 | Tipo | lib |
 | Versão da spec | 0.2.0 |
 | Data | 2026-11-11 |
-| Estado | **rascunho autorado, não aprovado** — §3 a §6, §9 e §10 escritos em 2026-11-11 a partir de `reference/audio/` e das TASKs E01-03, E01-05, E01-06, E01-10 e E08-01. O crate hoje só publica `VERSION`; tudo aqui é desenho de API. A aprovação é do mantenedor, por `GOVERNANCE.md` |
+| Estado | **§5 aprovada em 2026-11-18** pelo mantenedor (cartão `aaf4575d` da JKC-222, opção `approve-all`). As demais seções seguem rascunho autorado a partir de `reference/audio/` e das TASKs E01-03, E01-05, E01-06, E01-10 e E08-01: §3, §4, §6, §9 e §10 não foram aprovadas e não devem ser lidas como contrato. O crate hoje só publica `VERSION`; tudo aqui é desenho de API. A aprovação é do mantenedor, por `GOVERNANCE.md` |
 | Dono | mantenedor do `vynamp-engine` |
 | Depende de | decode, encode, output, dsp (as quatro) |
 | É dependido por | player, converter, restore |
