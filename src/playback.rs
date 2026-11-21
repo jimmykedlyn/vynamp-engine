@@ -128,8 +128,10 @@ impl std::error::Error for Error {}
 
 /// Geração de reprodução (`specs/engine.md` §3.4).
 ///
-/// Incrementada por `Open`, `Seek`, troca de faixa e `Stop`. Buffer marcado com
-/// geração diferente da atual é descartado pelo consumidor sem ser apresentado.
+/// Incrementada por `Open`, `Seek` e `Stop` (fora de `Idle`). A troca de faixa
+/// de §3.4 ainda não existe: depende de `Enqueue` (`specs/engine.md` §3.7).
+/// Buffer marcado com geração diferente da atual é descartado sem ser
+/// apresentado.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Generation(u64);
 
