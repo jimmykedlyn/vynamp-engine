@@ -193,7 +193,7 @@ pub enum Command {
     Open {
         /// Fonte a abrir.
         source: SourceRef,
-        /// Recomeça a tocar depois de abrir.
+        /// Toca (`Playing`) ou fica em `Paused` quando o ring fica pronto.
         autoplay: bool,
     },
     /// Retoma a reprodução.
@@ -481,7 +481,7 @@ impl Engine {
 
     /// Token de cancelamento da geração vigente, para workers que se registram.
     ///
-    /// Nesta TASK os workers são de teste; a troca acontece em `Stop` e `Seek`.
+    /// Nesta TASK os workers são de teste; a troca acontece em `Open`, `Seek` e `Stop`.
     pub fn current_cancel(&self) -> CancelHandle {
         let inner = self
             .inner
