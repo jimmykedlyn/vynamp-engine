@@ -133,7 +133,7 @@ impl std::error::Error for Error {}
 /// Buffer marcado com geração diferente da atual é descartado sem ser
 /// apresentado.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct Generation(u64);
+pub struct Generation(pub u64);
 
 impl Generation {
     /// Valor numérico da geração, para transporte e diagnóstico.

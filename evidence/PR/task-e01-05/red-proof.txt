@@ -1,0 +1,16 @@
+   Compiling vynamp_engine v0.1.0 (D:\Projects\vynamp\libs\engine\.worktrees\e01-05)
+error[E0432]: unresolved import `vynamp_engine::pipeline`
+ --> tests\pipeline.rs:4:20
+  |
+4 | use vynamp_engine::pipeline::{Pipeline, PipelineConfig, TestBackend};
+  |                    ^^^^^^^^ could not find `pipeline` in `vynamp_engine`
+
+error[E0433]: cannot find type `PipelineState` in this scope
+   --> tests\pipeline.rs:112:34
+    |
+112 |     assert_eq!(pipeline.state(), PipelineState::Idle);
+    |                                  ^^^^^^^^^^^^^ use of undeclared type `PipelineState`
+
+Some errors have detailed explanations: E0432, E0433.
+For more information about an error, try `rustc --explain E0432`.
+error: could not compile `vynamp_engine` (test "pipeline") due to 2 previous errors
