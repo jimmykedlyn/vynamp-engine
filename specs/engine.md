@@ -159,8 +159,22 @@ ENGINE-REQ-12.
   `Command::kind() -> CommandKind` dá o tipo do comando (`Open`, `Play`, `Pause`,
   `Stop`, `Seek`) para `Error::InvalidTransition`.
 - `Event` tem `StateChanged { from, to, generation }` e uma variante a mais que §3.3:
-  `Cancelled { generation }`, emitida quando a geração `generation` é cancelada.
-  `TrackStarted`, `TrackEnded`, `GaplessDegraded`, `Underrun` e `Error` não existem.
+  `Cancelled { generation }`. `TrackStarted`, `TrackEnded`, `GaplessDegraded`,
+  `Underrun` e `Error` não existem.
+- Toda mudança de estado emite um `StateChanged`, inclusive as dos gatilhos internos e
+  os saltos `Seeking → Buffering` e `Stopping → Idle`. O `generation` do evento é o
+  vigente quando `to` passa a valer.
+- `Cancelled { generation }` sai quando uma geração com trabalho em voo
+  (`PlaybackState::is_active()`) é encerrada por `Stop` ou `Seek`. O `Open` a partir de
+  `Idle` também troca a geração, mas não emite `Cancelled`, porque `Idle` não tem
+  trabalho em voo.
+- Sequências fixadas pelos testes, a partir da geração `g`:
+  - `Open`: `StateChanged(Idle→Opening, g+1)`.
+  - `Stop` em `Opening`: `StateChanged(Opening→Stopping, g)`, `Cancelled(g)` e
+    `StateChanged(Stopping→Idle, g+1)`.
+  - `Seek`: `StateChanged(Playing|Paused→Seeking, g)`, `Cancelled(g)` e
+    `StateChanged(Seeking→Buffering, g+1)`.
+  - `Stop` em `Idle`: nenhum evento.
 - Os eventos ficam numa fila limitada a 64 dentro do `Engine`. Quando ela enche, o
   evento mais antigo é descartado e conta em `Snapshot::dropped_events`.
   `Engine::drain_events() -> Vec<Event>` drena a fila na ordem de emissão.
@@ -183,13 +197,23 @@ deles é o orquestrador:
 - `Engine::notify_source_ready()` faz `Opening → Buffering` (fonte demuxada).
 - `Engine::notify_ring_ready()` faz `Buffering → Playing` ou `Paused` (ring na marca de
   partida).
+  - Depois de um `Open`, o destino é `Playing` se `autoplay`, e `Paused` se não.
+  - Depois de um `Seek`, o destino é o estado em que o `Seek` chegou (`Playing` ou
+    `Paused`). O `autoplay` do `Open` não vale mais.
 - Fora do estado de origem, as duas são no-op e não emitem evento.
 - Sem worker real nesta TASK, `Seeking → Buffering` e `Stopping → Idle` acontecem dentro
   do próprio `send`.
 
 **Cancelamento.**
 
-- `CancelToken::new`, `cancel` e `is_cancelled` seguem §3.4.
+- `CancelToken::new`, `cancel` e `is_cancelled` seguem §3.4. `cancel` grava com
+  `Release` e `is_cancelled` lê com `Acquire`.
+- `Open`, `Seek` e `Stop` (este fora de `Idle`) trocam a geração na mesma ordem:
+  1. gravam a geração nova (`Release`);
+  2. cancelam o token da geração velha;
+  3. criam o token da nova.
+
+  Por isso, um worker que vê o próprio token cancelado já lê a geração nova.
 - `Engine::current_cancel() -> CancelHandle` entrega ao worker que se registra a
   geração vigente (`CancelHandle::generation`) e uma leitura ao vivo do token dessa
   geração (`CancelHandle::is_cancelled`).
@@ -203,6 +227,18 @@ geração.
   entra.
 - `Engine::publish_buffer(&self, &mut dyn BufferSink, PcmBuffer)` entrega ao sink só o
   buffer da geração vigente.
+  - A comparação é um load atômico, sem lock.
+  - É um filtro antecipado, não a garantia: um `Seek` entre a comparação e o `push`
+    deixa entrar no ring um buffer que já é velho.
+- `Engine::presentation_gate() -> PresentationGate` entrega um handle clonável da
+  geração vigente.
+  - `PresentationGate::admits(Generation) -> bool` é um load `Acquire`, sem lock nem
+    alocação.
+  - Quem apresenta (a callback, em E01-05) chama `admits` com a geração de cada buffer
+    no momento de apresentá-lo, e descarta o buffer recusado.
+  - É esse load que garante ENGINE-AC-04. O ponto de linearização é o próprio load: um
+    período que já passou por `admits` antes do incremento termina de tocar o buffer
+    que admitiu, e nenhum buffer é admitido depois do incremento.
 
 ## 4. Requisitos
 
