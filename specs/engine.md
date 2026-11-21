@@ -7,7 +7,7 @@
 | Tipo | lib |
 | Versão da spec | 0.2.0 |
 | Data | 2026-11-11 |
-| Estado | **§5 aprovada em 2026-11-18** pelo mantenedor (cartão `aaf4575d` da JKC-222, opção `approve-all`). As demais seções seguem rascunho autorado a partir de `reference/audio/` e das TASKs E01-03, E01-05, E01-06, E01-10 e E08-01: §3, §4, §6, §9 e §10 não foram aprovadas e não devem ser lidas como contrato. O crate hoje só publica `VERSION`; tudo aqui é desenho de API. A aprovação é do mantenedor, por `GOVERNANCE.md` |
+| Estado | **§5 aprovada em 2026-11-18** pelo mantenedor (cartão `aaf4575d` da JKC-222, opção `approve-all`). As demais seções seguem rascunho autorado a partir de `reference/audio/` e das TASKs E01-03, E01-05, E01-06, E01-10 e E08-01: §3, §4, §6, §9 e §10 não foram aprovadas e não devem ser lidas como contrato. O crate publica `VERSION` e o domínio de reprodução da TASK-E01-03 (descrito em §3.7); o resto é desenho de API. A aprovação é do mantenedor, por `GOVERNANCE.md` |
 | Dono | mantenedor do `vynamp-engine` |
 | Depende de | decode, encode, output, dsp (as quatro) |
 | É dependido por | player, converter, restore |
@@ -239,6 +239,18 @@ geração.
   - É esse load que garante ENGINE-AC-04. O ponto de linearização é o próprio load: um
     período que já passou por `admits` antes do incremento termina de tocar o buffer
     que admitiu, e nenhum buffer é admitido depois do incremento.
+  - **Aguardando ratificação do mantenedor.** Esse período que termina de tocar
+    relaxa fisicamente ENGINE-AC-04 ("nenhum frame da geração 1 é apresentado depois
+    do seek"). O texto aprovado de ENGINE-AC-04 não muda.
+
+**Pendências conhecidas.**
+
+- **Troca de faixa.** §3.4 manda a troca de faixa incrementar a geração, mas ela não
+  existe sem `Enqueue`. Como `Open` fora de `Idle` devolve `InvalidTransition`, nenhum
+  caminho troca de faixa sem passar por `Stop`, que já incrementa.
+- **Stop em `DeviceLost`.** Hoje devolve `InvalidTransition`, contra ENGINE-REQ-14
+  ("depois de qualquer erro de §6 a instância aceita `Stop` e volta a `Idle`"). Fica
+  para a TASK-E01-10, dona da recuperação de dispositivo.
 
 ## 4. Requisitos
 
@@ -270,7 +282,8 @@ documento de requisitos do umbrella faz parte da aprovação.
 
 > Autorado em 2026-11-11. **Não aprovado.** Cada linha resume o critério da TASK
 > citada; havendo divergência, vale o texto da TASK, e esta tabela é corrigida no mesmo
-> PR. **Nenhum destes testes existe ainda**; a coluna nomeia o teste que a TASK cria.
+> PR. Os testes de `ENGINE-AC-02` a `ENGINE-AC-05` existem em `src/playback.rs`
+> (TASK-E01-03); os demais ainda não, e a coluna nomeia o teste que a TASK cria.
 
 | ID | Given | When | Then | Teste |
 |---|---|---|---|---|
