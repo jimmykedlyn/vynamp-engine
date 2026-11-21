@@ -96,3 +96,16 @@ Sem vermelho: a diferenca entre Relaxed e Release/Acquire nao e observavel de
 forma deterministica em x86-64 (TSO) num teste de processo. Nenhum teste novo
 foi escrito para isso, para nao registrar como TDD um teste verde de primeira.
 Coberto por revisao do codigo.
+
+== Achado 8 -- overflow de eventos tratado num lugar so ==
+Teste de caracterizacao event_overflow_drops_oldest_and_counts: verde no codigo
+antigo (o comportamento ja estava certo; o defeito era duplicacao). Provado por
+mutacao, com o fetch_add de dropped_events comentado:
+$ cargo test --locked event_overflow
+test playback::tests::event_overflow_drops_oldest_and_counts ... FAILED
+thread 'playback::tests::event_overflow_drops_oldest_and_counts' (19988) panicked at src\playback.rs:1205:9:
+  left: 0
+ right: 9
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+Depois da deduplicacao (EventQueue::push devolve se descartou; so publish conta):
+11 passed.

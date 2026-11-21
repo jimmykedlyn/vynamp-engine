@@ -281,11 +281,15 @@ struct EventQueue {
 }
 
 impl EventQueue {
-    fn push(&mut self, event: Event) {
-        if self.queue.len() >= self.capacity {
+    /// Enfileira `event`; com a fila cheia, descarta o mais antigo antes.
+    /// Devolve `true` se descartou: é o único lugar que trata o overflow.
+    fn push(&mut self, event: Event) -> bool {
+        let dropped = self.queue.len() >= self.capacity;
+        if dropped {
             self.queue.pop_front();
         }
         self.queue.push_back(event);
+        dropped
     }
 }
 
@@ -548,12 +552,10 @@ impl Engine {
             .lock()
             // Poço: fila própria; continuar publicando é seguro.
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if events.queue.len() >= events.capacity {
-            // Canal limitado: overflow descarta o mais antigo e conta.
-            events.queue.pop_front();
+        if events.push(event) {
+            // Canal limitado: o overflow descartou o mais antigo; conta.
             self.dropped_events.fetch_add(1, Ordering::Relaxed);
         }
-        events.push(event);
         drop(events);
         self.signal.notify_all();
     }
@@ -1176,6 +1178,42 @@ mod tests {
         assert_eq!(engine.send(Command::Seek), Ok(()));
         engine.notify_ring_ready();
         assert_eq!(engine.snapshot().state, PlaybackState::Playing);
+    }
+
+    /// §3.3/§3.7: fila de eventos limitada; o overflow descarta o mais
+    /// antigo e conta em `dropped_events`. Teste de caracterização.
+    ///
+    /// Given: nenhum consumidor drenando a fila de 64 eventos.
+    /// When: 3 transições do Open e 70 de Pause/Play são aplicadas.
+    /// Then: a fila guarda os 64 eventos mais recentes e `dropped_events`
+    /// conta os 9 perdidos (oráculo: aritmética das transições do harness).
+    #[test]
+    fn event_overflow_drops_oldest_and_counts() {
+        const CAPACITY: usize = 64;
+        const TOGGLES: usize = 70;
+        let engine = engine_in(true, PlaybackState::Playing);
+        for i in 0..TOGGLES {
+            let command = if i % 2 == 0 {
+                Command::Pause
+            } else {
+                Command::Play
+            };
+            assert_eq!(engine.send(command), Ok(()));
+        }
+        let emitted = 3 + TOGGLES;
+
+        let events = engine.drain_events();
+        assert_eq!(events.len(), CAPACITY, "a fila guarda só a capacidade");
+        assert_eq!(
+            engine.snapshot().dropped_events,
+            (emitted - CAPACITY) as u64,
+            "cada evento descartado é contado uma vez"
+        );
+        // O mais recente é o último toggle (Pause → Play, i ímpar).
+        assert_eq!(
+            events.last().copied(),
+            Some(changed(PlaybackState::Paused, PlaybackState::Playing, 1))
+        );
     }
 
     /// ENGINE-AC-05 / TASK-E01-03-AC-3: repeated stop é idempotente.
