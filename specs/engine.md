@@ -164,10 +164,10 @@ ENGINE-REQ-12.
 - Toda mudança de estado emite um `StateChanged`, inclusive as dos gatilhos internos e
   os saltos `Seeking → Buffering` e `Stopping → Idle`. O `generation` do evento é o
   vigente quando `to` passa a valer.
-- `Cancelled { generation }` sai quando uma geração com trabalho em voo
-  (`PlaybackState::is_active()`) é encerrada por `Stop` ou `Seek`. O `Open` a partir de
-  `Idle` também troca a geração, mas não emite `Cancelled`, porque `Idle` não tem
-  trabalho em voo.
+- `Cancelled { generation }` sai em todo `Stop` aceito fora de `Idle` (inclusive em
+  `Error`) e em todo `Seek`, com a geração encerrada. O `Open` a partir de `Idle`
+  também troca a geração, mas não emite `Cancelled`, porque `Idle` não tem trabalho em
+  voo.
 - Sequências fixadas pelos testes, a partir da geração `g`:
   - `Open`: `StateChanged(Idle→Opening, g+1)`.
   - `Stop` em `Opening`: `StateChanged(Opening→Stopping, g)`, `Cancelled(g)` e
