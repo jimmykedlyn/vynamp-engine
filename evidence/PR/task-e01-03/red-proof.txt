@@ -56,3 +56,22 @@ assertion `left == right` failed: Open incrementa a geração
  right: 1
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
 Depois: 7 passed.
+
+== Achado 4 (e 9) -- StateChanged em toda transicao; contador de todos os eventos ==
+Testes endurecidos stop_during_opening_cancels_everything e
+repeated_stop_is_idempotent (EventLog do harness conta todas as variantes) e
+teste novo every_transition_emits_state_changed, antes da correcao (so saia
+Cancelled):
+$ cargo test --locked
+test playback::tests::stop_during_opening_cancels_everything ... FAILED
+test playback::tests::every_transition_emits_state_changed ... FAILED
+test playback::tests::repeated_stop_is_idempotent ... FAILED
+thread 'playback::tests::stop_during_opening_cancels_everything' (11244) panicked at src\playback.rs:769:9:
+  left: []
+thread 'playback::tests::every_transition_emits_state_changed' (11840) panicked at src\playback.rs:1101:9:
+  left: [Cancelled { generation: Generation(1) }, Cancelled { generation: Generation(2) }]
+thread 'playback::tests::repeated_stop_is_idempotent' (35784) panicked at src\playback.rs:1145:9:
+  left: [Cancelled { generation: Generation(1) }]
+test result: FAILED. 5 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Depois: 8 passed. O parametro generation e o debug_assert vacuo de
+EngineInner::transition sairam: Engine::transition e o ponto unico de emissao.

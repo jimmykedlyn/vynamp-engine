@@ -331,13 +331,13 @@ impl Engine {
             // Poço: só nos recuperamos do envenenamento relendo o estado
             // consistente; nenhuma invariante do domínio vive além do lock.
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let generation = inner.generation;
         match (inner.state, command) {
             (PlaybackState::Idle, Command::Open { autoplay, .. }) => {
                 inner.autoplay = autoplay;
-                // §3.4: Open incrementa a geração e cancela a anterior.
+                // §3.4: Open incrementa a geração e cancela a anterior. Idle
+                // não tem trabalho em voo, então não sai `Cancelled` (§3.7).
                 self.advance_generation(&mut inner);
-                inner.transition(PlaybackState::Opening, generation);
+                self.transition(&mut inner, PlaybackState::Opening);
             }
             (PlaybackState::Opening, Command::Stop)
             | (PlaybackState::Buffering, Command::Stop)
@@ -346,28 +346,28 @@ impl Engine {
             | (PlaybackState::Seeking, Command::Stop)
             | (PlaybackState::Reconnecting, Command::Stop)
             | (PlaybackState::Error(_), Command::Stop) => {
-                inner.transition(PlaybackState::Stopping, generation);
+                self.transition(&mut inner, PlaybackState::Stopping);
                 // §3.2: Stopping → Idle é a geração encerrada; sem worker real
                 // nesta TASK, a transição é imediata e o evento de cancelamento
                 // sai com a geração que acabou de morrer.
-                self.advance_generation(&mut inner);
-                inner.transition(PlaybackState::Idle, generation);
+                let ended = self.advance_generation(&mut inner);
+                self.publish(Event::Cancelled { generation: ended });
                 inner.autoplay = true;
-                self.publish(Event::Cancelled { generation });
+                self.transition(&mut inner, PlaybackState::Idle);
             }
             (PlaybackState::Playing, Command::Pause) => {
-                inner.transition(PlaybackState::Paused, generation);
+                self.transition(&mut inner, PlaybackState::Paused);
             }
             (PlaybackState::Paused, Command::Play) => {
-                inner.transition(PlaybackState::Playing, generation);
+                self.transition(&mut inner, PlaybackState::Playing);
             }
             (PlaybackState::Playing, Command::Seek) | (PlaybackState::Paused, Command::Seek) => {
-                inner.transition(PlaybackState::Seeking, generation);
+                self.transition(&mut inner, PlaybackState::Seeking);
                 // §3.4: seek incrementa a geração; ring da geração velha é
                 // drenado pelo consumidor, não apresentado (E01-05 real).
-                self.advance_generation(&mut inner);
-                inner.transition(PlaybackState::Buffering, generation);
-                self.publish(Event::Cancelled { generation });
+                let ended = self.advance_generation(&mut inner);
+                self.publish(Event::Cancelled { generation: ended });
+                self.transition(&mut inner, PlaybackState::Buffering);
             }
             // Stop em Idle não muda estado nem emite evento (§3.4).
             (PlaybackState::Idle, Command::Stop) => {}
@@ -394,10 +394,7 @@ impl Engine {
             // Poço: leitura de estado consistente; transição segue a tabela.
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if inner.state == PlaybackState::Opening {
-            let generation = inner.generation;
-            inner.transition(PlaybackState::Buffering, generation);
-            drop(inner);
-            self.signal.notify_all();
+            self.transition(&mut inner, PlaybackState::Buffering);
         }
     }
 
@@ -417,15 +414,12 @@ impl Engine {
             // Poço: leitura de estado consistente; transição segue a tabela.
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if inner.state == PlaybackState::Buffering {
-            let generation = inner.generation;
             let target = if inner.autoplay {
                 PlaybackState::Playing
             } else {
                 PlaybackState::Paused
             };
-            inner.transition(target, generation);
-            drop(inner);
-            self.signal.notify_all();
+            self.transition(&mut inner, target);
         }
         // Fora de Buffering o gatilho não existe: no-op, sem evento.
     }
@@ -514,15 +508,31 @@ impl Engine {
         }
     }
 
+    /// Ponto único de mudança de estado: grava `to` e emite o `StateChanged`
+    /// com a geração vigente no estado novo (§3.7). Chamado com o lock de
+    /// estado tomado; a ordem de locks é sempre estado → eventos.
+    fn transition(&self, inner: &mut EngineInner, to: PlaybackState) {
+        let from = inner.state;
+        inner.state = to;
+        self.publish(Event::StateChanged {
+            from,
+            to,
+            generation: inner.generation,
+        });
+    }
+
     /// Troca a geração na ordem de §3.7: grava a geração nova (`Release`),
     /// cancela o token da velha e cria o token da nova. Quem observa o token
-    /// velho cancelado (`Acquire`) já lê a geração nova.
-    fn advance_generation(&self, inner: &mut EngineInner) {
-        let next = Generation(inner.generation.value() + 1);
+    /// velho cancelado (`Acquire`) já lê a geração nova. Devolve a geração
+    /// encerrada.
+    fn advance_generation(&self, inner: &mut EngineInner) -> Generation {
+        let ended = inner.generation;
+        let next = Generation(ended.value() + 1);
         inner.generation = next;
         self.current.store(next.value(), Ordering::Release);
         inner.cancel.cancel();
         inner.cancel = Arc::new(CancelToken::default());
+        ended
     }
 
     fn publish(&self, event: Event) {
@@ -579,18 +589,6 @@ impl CancelHandle {
     /// Verdadeiro se a geração deste handle foi cancelada (consulta ao vivo).
     pub fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
-    }
-}
-
-impl EngineInner {
-    /// Transição de estado; o evento `StateChanged` correspondente é publicado
-    /// pelo `Engine` que detém o lock de eventos, não aqui.
-    fn transition(&mut self, to: PlaybackState, generation: Generation) {
-        self.state = to;
-        debug_assert!(
-            self.generation >= generation,
-            "transicao para geracao mais antiga que a vigente"
-        );
     }
 }
 
@@ -662,6 +660,41 @@ mod tests {
         }
     }
 
+    /// Contador de eventos do harness: drena a fila do engine e guarda tudo o
+    /// que saiu, de qualquer variante, na ordem. O oráculo é o que o harness
+    /// viu sair, não um contador do domínio.
+    #[derive(Default)]
+    struct EventLog {
+        seen: Vec<Event>,
+    }
+
+    impl EventLog {
+        /// Drena o engine e devolve só os eventos novos desta leitura.
+        fn take(&mut self, engine: &Engine) -> Vec<Event> {
+            let new = engine.drain_events();
+            self.seen.extend(new.iter().copied());
+            new
+        }
+
+        fn count(&self) -> usize {
+            self.seen.len()
+        }
+    }
+
+    fn changed(from: PlaybackState, to: PlaybackState, generation: u64) -> Event {
+        Event::StateChanged {
+            from,
+            to,
+            generation: Generation(generation),
+        }
+    }
+
+    fn cancelled(generation: u64) -> Event {
+        Event::Cancelled {
+            generation: Generation(generation),
+        }
+    }
+
     /// Motivo pelo qual um worker de teste retornou, contado pelo harness.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum WorkerExit {
@@ -710,8 +743,10 @@ mod tests {
     /// primeiro buffer.
     /// When: Stop é aplicado, a barreira abre e o teste espera os workers.
     /// Then: o estado é Idle, nenhum buffer entrou no ring (oráculo: o ring
-    /// do harness) e cada worker saiu porque viu o token cancelado, não por
-    /// ter esgotado os buffers (oráculo: o canal de saída do harness).
+    /// do harness), cada worker saiu porque viu o token cancelado, não por
+    /// ter esgotado os buffers (oráculo: o canal de saída do harness), e os
+    /// eventos que saíram são exatamente os da sequência de §3.7 (oráculo: o
+    /// `EventLog` do harness, que conta todas as variantes).
     #[test]
     fn stop_during_opening_cancels_everything() {
         const WORKERS: usize = 2;
@@ -728,7 +763,12 @@ mod tests {
             // Invariante: Idle→Opening está na tabela de §3.2.
             .expect("Idle→Opening é transição da tabela");
         assert_eq!(engine.snapshot().state, PlaybackState::Opening);
-        engine.drain_events();
+        let mut log = EventLog::default();
+        assert_eq!(
+            log.take(&engine),
+            vec![changed(PlaybackState::Idle, PlaybackState::Opening, 1)],
+            "Open emite só Idle→Opening, já na geração 1"
+        );
 
         let ring = SharedRing::default();
         let start = Arc::new(std::sync::Barrier::new(WORKERS + 1));
@@ -762,6 +802,16 @@ mod tests {
         );
         assert_eq!(ring.len(), 0, "nenhum buffer entra no ring depois do Stop");
         assert_eq!(engine.snapshot().state, PlaybackState::Idle);
+        assert_eq!(
+            log.take(&engine),
+            vec![
+                changed(PlaybackState::Opening, PlaybackState::Stopping, 1),
+                cancelled(1),
+                changed(PlaybackState::Stopping, PlaybackState::Idle, 2),
+            ],
+            "Stop em Opening emite exatamente esta sequência"
+        );
+        assert_eq!(log.count(), 4, "total de eventos do Open e do Stop");
     }
 
     /// ENGINE-AC-04 / TASK-E01-03-AC-2: seek/troca descarta buffers antigos.
@@ -1017,53 +1067,113 @@ mod tests {
         assert!(!engine.current_cancel().is_cancelled());
     }
 
+    /// §3.7: toda transição emite `StateChanged`, com a geração vigente no
+    /// estado novo, inclusive as dos gatilhos internos.
+    ///
+    /// Given: o engine em Idle.
+    /// When: percorre Open, fonte pronta, ring pronto, Pause, Play, Seek, ring
+    /// pronto e Stop.
+    /// Then: o `EventLog` do harness vê exatamente a sequência abaixo, uma
+    /// entrada por transição, e nada mais.
+    #[test]
+    fn every_transition_emits_state_changed() {
+        use PlaybackState::{Buffering, Idle, Opening, Paused, Playing, Seeking, Stopping};
+        let engine = Engine::new();
+        let mut log = EventLog::default();
+
+        assert_eq!(
+            engine.send(Command::Open {
+                source: SourceRef::new(4),
+                autoplay: true,
+            }),
+            Ok(())
+        );
+        engine.notify_source_ready();
+        engine.notify_ring_ready();
+        assert_eq!(engine.send(Command::Pause), Ok(()));
+        assert_eq!(engine.send(Command::Play), Ok(()));
+        assert_eq!(engine.send(Command::Seek), Ok(()));
+        engine.notify_ring_ready();
+        assert_eq!(engine.send(Command::Stop), Ok(()));
+
+        assert_eq!(
+            log.take(&engine),
+            vec![
+                changed(Idle, Opening, 1),
+                changed(Opening, Buffering, 1),
+                changed(Buffering, Playing, 1),
+                changed(Playing, Paused, 1),
+                changed(Paused, Playing, 1),
+                changed(Playing, Seeking, 1),
+                cancelled(1),
+                changed(Seeking, Buffering, 2),
+                changed(Buffering, Playing, 2),
+                changed(Playing, Stopping, 2),
+                cancelled(2),
+                changed(Stopping, Idle, 3),
+            ]
+        );
+
+        // Gatilho fora do estado de origem: no-op, sem evento.
+        engine.notify_source_ready();
+        engine.notify_ring_ready();
+        assert_eq!(log.take(&engine), Vec::new());
+    }
+
     /// ENGINE-AC-05 / TASK-E01-03-AC-3: repeated stop é idempotente.
     ///
-    /// Given: estado em Idle depois de um Stop aplicado.
-    /// When: Stop é enviado três vezes seguidas.
-    /// Then: o contador de eventos do domínio é lido; o 1º Stop aplicado
-    /// produziu 1 evento Cancelled e o 2º e o 3º não o movem — contadores
-    /// contados fora do código sob teste.
+    /// Given: o estado em Idle depois de um Stop aplicado.
+    /// When: Stop é enviado três vezes seguidas e o contador de eventos é lido.
+    /// Then: o 1º Stop aplicado moveu o contador com a sequência exata de §3.7,
+    /// com uma única transição para Stopping; os três seguintes devolvem `Ok`
+    /// e não movem o contador, de nenhuma variante. Estado, geração e
+    /// `dropped_events` também não mudam. O contador é o `EventLog` do harness.
     #[test]
     fn repeated_stop_is_idempotent() {
         let engine = Engine::new();
-        engine
-            .send(Command::Open {
+        let mut log = EventLog::default();
+        assert_eq!(
+            engine.send(Command::Open {
                 source: SourceRef::new(3),
                 autoplay: true,
+            }),
+            Ok(())
+        );
+        assert_eq!(engine.send(Command::Stop), Ok(()));
+        assert_eq!(
+            log.take(&engine),
+            vec![
+                changed(PlaybackState::Idle, PlaybackState::Opening, 1),
+                changed(PlaybackState::Opening, PlaybackState::Stopping, 1),
+                cancelled(1),
+                changed(PlaybackState::Stopping, PlaybackState::Idle, 2),
+            ]
+        );
+        let stops = log
+            .seen
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::StateChanged {
+                        to: PlaybackState::Stopping,
+                        ..
+                    }
+                )
             })
-            .expect("Idle→Opening é transição da tabela");
-        engine
-            .send(Command::Stop)
-            .expect("Opening→Stopping é da tabela");
-        assert_eq!(engine.snapshot().state, PlaybackState::Idle);
+            .count();
+        assert_eq!(stops, 1, "o 1º Stop aplicado é uma transição para Stopping");
+        let counted = log.count();
+        let before = engine.snapshot();
+        assert_eq!(before.state, PlaybackState::Idle);
 
-        // Oráculo: contagem de eventos Cancelled, fora do domínio. O primeiro
-        // Stop aplicado produziu exatamente 1; os três seguintes não movem.
-        let count_cancelled = |e: &Engine| {
-            e.drain_events()
-                .iter()
-                .filter(|ev| matches!(ev, Event::Cancelled { .. }))
-                .count()
-        };
+        for _ in 0..3 {
+            assert_eq!(engine.send(Command::Stop), Ok(()), "Stop em Idle é Ok");
+        }
 
-        let after_first = count_cancelled(&engine);
-        assert_eq!(after_first, 1, "o 1º Stop aplicado emite 1 Cancelled");
-        engine
-            .send(Command::Stop)
-            .expect("Stop em Idle não muda estado");
-        engine.send(Command::Stop).expect("idempotente");
-        engine.send(Command::Stop).expect("idempotente");
-        let after_three_more = count_cancelled(&engine);
-
-        assert_eq!(after_three_more, 0, "Stop repetido não emite evento nenhum");
-        let snap = engine.snapshot();
-        assert_eq!(snap.state, PlaybackState::Idle, "estado não muda");
-        // E a geração não avança: Stop em Idle é no-op total.
-        // (A geração do snapshot é a mesma das três chamadas anteriores.)
-        let gen_before = snap.generation;
-        engine.send(Command::Stop).expect("ainda idempotente");
-        assert_eq!(engine.snapshot().generation, gen_before);
+        assert_eq!(log.take(&engine), Vec::new(), "Stop em Idle não emite nada");
+        assert_eq!(log.count(), counted, "o contador não se move");
+        assert_eq!(engine.snapshot(), before, "estado e geração não mudam");
     }
 
     /// Sink que retém buffers num Vec do teste (ring de fixture).
