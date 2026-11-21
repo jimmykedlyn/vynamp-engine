@@ -7,7 +7,7 @@
 | Tipo | lib |
 | Versão da spec | 0.2.0 |
 | Data | 2026-11-11 |
-| Estado | **§5 aprovada em 2026-11-18** pelo mantenedor (cartão `aaf4575d` da JKC-222, opção `approve-all`). As demais seções seguem rascunho autorado a partir de `reference/audio/` e das TASKs E01-03, E01-05, E01-06, E01-10 e E08-01: §3, §4, §6, §9 e §10 não foram aprovadas e não devem ser lidas como contrato. O crate hoje só publica `VERSION`; tudo aqui é desenho de API. A aprovação é do mantenedor, por `GOVERNANCE.md` |
+| Estado | **§5 aprovada em 2026-11-18** pelo mantenedor (cartão `aaf4575d` da JKC-222, opção `approve-all`). As demais seções seguem rascunho autorado a partir de `reference/audio/` e das TASKs E01-03, E01-05, E01-06, E01-10 e E08-01: §3, §4, §6, §9 e §10 não foram aprovadas e não devem ser lidas como contrato. O crate publica `VERSION` e o domínio de reprodução da TASK-E01-03 (descrito em §3.7); o resto é desenho de API. A aprovação é do mantenedor, por `GOVERNANCE.md` |
 | Dono | mantenedor do `vynamp-engine` |
 | Depende de | decode, encode, output, dsp (as quatro) |
 | É dependido por | player, converter, restore |
@@ -144,6 +144,114 @@ com checkpoint em disco, lease por job, progresso e pools limitados. Os nomes
 TASK e voltam a esta seção quando ela sair de `planned`; aqui fica só a garantia de
 ENGINE-REQ-12.
 
+### 3.7 O que a TASK-E01-03 publica hoje
+
+> Descreve o código de `src/playback.rs`, não um desenho. Continua rascunho como o resto
+> de §3: registra onde a implementação diverge de §3.1–§3.5 e a API que ela precisou
+> acrescentar. Mudança no código volta aqui no mesmo PR.
+
+**Subconjuntos de §3.3, §3.5 e §6.**
+
+- `Command` tem só `Open { source: SourceRef, autoplay: bool }`, `Play`, `Pause`, `Stop`
+  e `Seek`. `Open` não leva `start` e `Seek` não leva alvo, porque `MediaTime` (§3.1)
+  ainda não existe no crate. Resolver tempo em byte/frame é do `vynamp-decode`
+  (TASK-E01-04). `Enqueue`, `SetVolume` e `SetTransition` não existem.
+  `Command::kind() -> CommandKind` dá o tipo do comando (`Open`, `Play`, `Pause`,
+  `Stop`, `Seek`) para `Error::InvalidTransition`.
+- `Event` tem `StateChanged { from, to, generation }` e uma variante a mais que §3.3:
+  `Cancelled { generation }`. `TrackStarted`, `TrackEnded`, `GaplessDegraded`,
+  `Underrun` e `Error` não existem.
+- Toda mudança de estado emite um `StateChanged`, inclusive as dos gatilhos internos e
+  os saltos `Seeking → Buffering` e `Stopping → Idle`. O `generation` do evento é o
+  vigente quando `to` passa a valer.
+- `Cancelled { generation }` sai em todo `Stop` aceito fora de `Idle` (inclusive em
+  `Error`) e em todo `Seek`, com a geração encerrada. O `Open` a partir de `Idle`
+  também troca a geração, mas não emite `Cancelled`, porque `Idle` não tem trabalho em
+  voo.
+- Sequências fixadas pelos testes, a partir da geração `g`:
+  - `Open`: `StateChanged(Idle→Opening, g+1)`.
+  - `Stop` em `Opening`: `StateChanged(Opening→Stopping, g)`, `Cancelled(g)` e
+    `StateChanged(Stopping→Idle, g+1)`.
+  - `Seek`: `StateChanged(Playing|Paused→Seeking, g)`, `Cancelled(g)` e
+    `StateChanged(Seeking→Buffering, g+1)`.
+  - `Stop` em `Idle`: nenhum evento.
+- Os eventos ficam numa fila limitada a 64 dentro do `Engine`. Quando ela enche, o
+  evento mais antigo é descartado e conta em `Snapshot::dropped_events`.
+  `Engine::drain_events() -> Vec<Event>` drena a fila na ordem de emissão.
+  `Engine::wait_events(Duration) -> Vec<Event>` espera até o prazo por pelo menos um
+  evento e serve a testes e hosts. Nenhuma das duas é caminho de áudio.
+- `Snapshot` tem `state`, `generation` e `dropped_events`. `position` e `underruns`
+  chegam com o relógio e o ring (TASK-E01-05).
+- `Error` tem `InvalidTransition { from, command }`, `InvalidArgument(&'static str)` e
+  `Cancelled`. As variantes que embrulham erro de outra lib chegam com a dependência.
+- `PlaybackState::Error` carrega um `ErrorKind` (`Decode`, `Output` ou `Io`).
+- `PlaybackState::is_active()` é falso só em `Idle`, `DeviceLost` e `Error`.
+- `Generation::value() -> u64` expõe o número para transporte.
+
+**Fonte.** `SourceRef { id: u64 }`, com `SourceRef::new(u64)`, é um identificador opaco
+que substitui o handle do `vynamp-decode` até a TASK-E01-04 fixar esse handle.
+
+**Gatilhos internos de §3.2.** Nenhum comando aceita `Opening` ou `Buffering`. Quem sai
+deles é o orquestrador:
+
+- `Engine::notify_source_ready()` faz `Opening → Buffering` (fonte demuxada).
+- `Engine::notify_ring_ready()` faz `Buffering → Playing` ou `Paused` (ring na marca de
+  partida).
+  - Depois de um `Open`, o destino é `Playing` se `autoplay`, e `Paused` se não.
+  - Depois de um `Seek`, o destino é o estado em que o `Seek` chegou (`Playing` ou
+    `Paused`). O `autoplay` do `Open` não vale mais.
+- Fora do estado de origem, as duas são no-op e não emitem evento.
+- Sem worker real nesta TASK, `Seeking → Buffering` e `Stopping → Idle` acontecem dentro
+  do próprio `send`.
+
+**Cancelamento.**
+
+- `CancelToken::new`, `cancel` e `is_cancelled` seguem §3.4. `cancel` grava com
+  `Release` e `is_cancelled` lê com `Acquire`.
+- `Open`, `Seek` e `Stop` (este fora de `Idle`) trocam a geração na mesma ordem:
+  1. gravam a geração nova (`Release`);
+  2. cancelam o token da geração velha;
+  3. criam o token da nova.
+
+  Por isso, um worker que vê o próprio token cancelado já lê a geração nova.
+- `Engine::current_cancel() -> CancelHandle` entrega ao worker que se registra a
+  geração vigente (`CancelHandle::generation`) e uma leitura ao vivo do token dessa
+  geração (`CancelHandle::is_cancelled`).
+
+**Transporte de buffer.** Não é o ring de E01-05: é o mínimo para provar o descarte por
+geração.
+
+- `PcmBuffer { generation: Generation, frames: u64 }` é o buffer marcado com a geração
+  que o produziu.
+- `trait BufferSink { fn push(&mut self, buffer: PcmBuffer); }` é a porta onde o buffer
+  entra.
+- `Engine::publish_buffer(&self, &mut dyn BufferSink, PcmBuffer)` entrega ao sink só o
+  buffer da geração vigente.
+  - A comparação é um load atômico, sem lock.
+  - É um filtro antecipado, não a garantia: um `Seek` entre a comparação e o `push`
+    deixa entrar no ring um buffer que já é velho.
+- `Engine::presentation_gate() -> PresentationGate` entrega um handle clonável da
+  geração vigente.
+  - `PresentationGate::admits(Generation) -> bool` é um load `Acquire`, sem lock nem
+    alocação.
+  - Quem apresenta (a callback, em E01-05) chama `admits` com a geração de cada buffer
+    no momento de apresentá-lo, e descarta o buffer recusado.
+  - É esse load que garante ENGINE-AC-04. O ponto de linearização é o próprio load: um
+    período que já passou por `admits` antes do incremento termina de tocar o buffer
+    que admitiu, e nenhum buffer é admitido depois do incremento.
+  - **Aguardando ratificação do mantenedor.** Esse período que termina de tocar
+    relaxa fisicamente ENGINE-AC-04 ("nenhum frame da geração 1 é apresentado depois
+    do seek"). O texto aprovado de ENGINE-AC-04 não muda.
+
+**Pendências conhecidas.**
+
+- **Troca de faixa.** §3.4 manda a troca de faixa incrementar a geração, mas ela não
+  existe sem `Enqueue`. Como `Open` fora de `Idle` devolve `InvalidTransition`, nenhum
+  caminho troca de faixa sem passar por `Stop`, que já incrementa.
+- **Stop em `DeviceLost`.** Hoje devolve `InvalidTransition`, contra ENGINE-REQ-14
+  ("depois de qualquer erro de §6 a instância aceita `Stop` e volta a `Idle`"). Fica
+  para a TASK-E01-10, dona da recuperação de dispositivo.
+
 ## 4. Requisitos
 
 > Autorado em 2026-11-11. **Não aprovado.** Cada requisito aponta para o critério de §5
@@ -174,7 +282,8 @@ documento de requisitos do umbrella faz parte da aprovação.
 
 > Autorado em 2026-11-11. **Não aprovado.** Cada linha resume o critério da TASK
 > citada; havendo divergência, vale o texto da TASK, e esta tabela é corrigida no mesmo
-> PR. **Nenhum destes testes existe ainda**; a coluna nomeia o teste que a TASK cria.
+> PR. Os testes de `ENGINE-AC-02` a `ENGINE-AC-05` existem em `src/playback.rs`
+> (TASK-E01-03); os demais ainda não, e a coluna nomeia o teste que a TASK cria.
 
 | ID | Given | When | Then | Teste |
 |---|---|---|---|---|

@@ -1,0 +1,195 @@
+Prova do vermelho -- correcao do review da TASK-E01-03 (um bloco por achado)
+Base: 7d814d9. Mutacoes aplicadas a mao no fonte (sed numa linha), rodadas e
+revertidas. Cada reversao foi conferida com sed -n na linha e com a suite verde,
+e no fim "grep -rn MUTANTE src/" voltou vazio. git diff nao serviu de prova: a
+arvore tinha o teste ou a correcao ainda nao commitados durante a mutacao.
+Variavel de ambiente nao serve: nao chega ao binario de teste.
+
+== Achado 1 -- stop_during_opening_cancels_everything (AC-1 / ENGINE-AC-02) ==
+Antes (teste antigo): mutacao "// MUTANTE: inner.cancel.cancel();" no braco
+Stop de Engine::send; cargo test --locked stop_during_opening
+  -> 1 passed  (o teste antigo era vacuo: verde sem o cancelamento)
+Depois (teste novo: handles pegos em Opening, barreira, SharedRing do harness,
+WorkerExit contado pelo harness, Result do Stop assertado), mesma mutacao:
+$ cargo test --locked stop_during_opening
+thread 'playback::tests::stop_during_opening_cancels_everything' (25872) panicked at src\playback.rs:716:9:
+assertion `left == right` failed: cada worker sai por ver o token cancelado
+  left: [Exhausted, Exhausted]
+ right: [Cancelled, Cancelled]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+Sem mutacao: 1 passed.
+
+== Achado 2 -- publish_buffer sem lock + TOCTOU (ENGINE-AC-04) ==
+(a) Vermelho no contrato antigo (publish_buffer com Mutex; consumidor apresenta o
+ring cru, porque o portao ainda nao existia). Testes novos:
+publish_buffer_does_not_take_the_state_lock (lock de estado segurado pelo teste)
+e seek_between_check_and_push_is_not_presented (sink de teste aplica Seek dentro
+do push, entre a checagem e a entrada no ring):
+$ cargo test --locked -- publish_buffer_does_not seek_between
+test playback::tests::seek_between_check_and_push_is_not_presented ... FAILED
+test playback::tests::publish_buffer_does_not_take_the_state_lock ... FAILED
+thread 'playback::tests::seek_between_check_and_push_is_not_presented' (26552) panicked at src\playback.rs:921:9:
+  left: 512
+ right: 0
+thread 'playback::tests::publish_buffer_does_not_take_the_state_lock' (31028) panicked at src\playback.rs:855:9:
+publish_buffer esperou o lock de estado do Engine
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 4 filtered out; finished in 2.01s
+(b) Depois do verde, o contrato do consumidor mudou: ele apresenta pelo
+PresentationGate::admits. Mutacao do portao para sempre admitir
+("{ let _ = (generation, &self.current); true } // MUTANTE"):
+$ cargo test --locked
+test playback::tests::seek_between_check_and_push_is_not_presented ... FAILED
+test playback::tests::seek_discards_stale_buffers ... FAILED
+thread 'playback::tests::seek_between_check_and_push_is_not_presented' (35036) panicked at src\playback.rs:970:9:
+  left: 512
+ right: 0
+thread 'playback::tests::seek_discards_stale_buffers' (26088) panicked at src\playback.rs:851:9:
+  left: 1024
+ right: 0
+Sem mutacao: 6 passed.
+
+== Achado 3 -- Open incrementa a geracao e cancela o token (spec 3.4) ==
+Teste novo open_advances_generation_and_cancels_previous, antes da correcao:
+$ cargo test --locked open_advances
+test playback::tests::open_advances_generation_and_cancels_previous ... FAILED
+thread 'playback::tests::open_advances_generation_and_cancels_previous' (19344) panicked at src\playback.rs:1005:9:
+assertion `left == right` failed: Open incrementa a geração
+  left: 0
+ right: 1
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+Depois: 7 passed.
+
+== Achado 4 (e 9) -- StateChanged em toda transicao; contador de todos os eventos ==
+Testes endurecidos stop_during_opening_cancels_everything e
+repeated_stop_is_idempotent (EventLog do harness conta todas as variantes) e
+teste novo every_transition_emits_state_changed, antes da correcao (so saia
+Cancelled):
+$ cargo test --locked
+test playback::tests::stop_during_opening_cancels_everything ... FAILED
+test playback::tests::every_transition_emits_state_changed ... FAILED
+test playback::tests::repeated_stop_is_idempotent ... FAILED
+thread 'playback::tests::stop_during_opening_cancels_everything' (11244) panicked at src\playback.rs:769:9:
+  left: []
+thread 'playback::tests::every_transition_emits_state_changed' (11840) panicked at src\playback.rs:1101:9:
+  left: [Cancelled { generation: Generation(1) }, Cancelled { generation: Generation(2) }]
+thread 'playback::tests::repeated_stop_is_idempotent' (35784) panicked at src\playback.rs:1145:9:
+  left: [Cancelled { generation: Generation(1) }]
+test result: FAILED. 5 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+Depois: 8 passed. O parametro generation e o debug_assert vacuo de
+EngineInner::transition sairam: Engine::transition e o ponto unico de emissao.
+
+== Achado 5 -- Seek volta ao estado de antes, nao ao autoplay do Open ==
+Testes novos seek_while_paused_resumes_paused (Open autoplay:true, Pause, Seek)
+e seek_while_playing_resumes_playing (Open autoplay:false, Play, Seek):
+$ cargo test --locked -- seek_while
+test playback::tests::seek_while_playing_resumes_playing ... FAILED
+test playback::tests::seek_while_paused_resumes_paused ... FAILED
+thread 'playback::tests::seek_while_playing_resumes_playing' (7804) panicked at src\playback.rs:1171:9:
+  left: Paused
+ right: Playing
+thread 'playback::tests::seek_while_paused_resumes_paused' (32628) panicked at src\playback.rs:1158:9:
+  left: Playing
+ right: Paused
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+Depois: 10 passed.
+
+== Achado 6 -- CancelToken Release/Acquire ==
+Sem vermelho: a diferenca entre Relaxed e Release/Acquire nao e observavel de
+forma deterministica em x86-64 (TSO) num teste de processo. Nenhum teste novo
+foi escrito para isso, para nao registrar como TDD um teste verde de primeira.
+Coberto por revisao do codigo.
+
+== Achado 8 -- overflow de eventos tratado num lugar so ==
+Teste de caracterizacao event_overflow_drops_oldest_and_counts: verde no codigo
+antigo (o comportamento ja estava certo; o defeito era duplicacao). Provado por
+mutacao, com o fetch_add de dropped_events comentado:
+$ cargo test --locked event_overflow
+test playback::tests::event_overflow_drops_oldest_and_counts ... FAILED
+thread 'playback::tests::event_overflow_drops_oldest_and_counts' (19988) panicked at src\playback.rs:1205:9:
+  left: 0
+ right: 9
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+Depois da deduplicacao (EventQueue::push devolve se descartou; so publish conta):
+11 passed.
+
+== Achado 10 -- new_generation_cancels_old_workers (ENGINE-AC-03) cobre o Seek ==
+O comentario falava em "Pause em Buffering" e o teste trocava a geracao por
+Stop. Agora: Open autoplay:false, Paused, 4 handles, Seek. Mutacao do cancel()
+em Engine::advance_generation (ponto unico da troca de geracao):
+$ cargo test --locked new_generation
+test playback::tests::new_generation_cancels_old_workers ... FAILED
+thread 'playback::tests::new_generation_cancels_old_workers' (27596) panicked at src\playback.rs:1305:9:
+  left: 0
+ right: 4
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+Sem mutacao: 11 passed.
+
+== Achado 7 -- API fora de 3 documentada na spec ==
+So docs: commits 448fd18 e ac39fba (specs/engine.md 3.7) e a frase de
+TASK-E01-03.md sobre 5 aprovada. Sem teste. Cancelled em Stop a partir de
+Error nao tem teste: nenhuma API publica leva o engine a Error.
+
+== Achado 9 -- debug_assert vacuo e parametro generation sem uso ==
+Corrigido junto com o achado 4 (commit ae0eaa4); o vermelho e o do bloco 4.
+
+== Segunda revisao, item 1 -- publish_buffer descarta geracao velha ==
+Teste novo publish_buffer_drops_stale_generation. Mutacao: a checagem de
+geracao de publish_buffer trocada por "if true {":
+$ cargo test --locked -- publish_buffer_drops_stale
+test playback::tests::publish_buffer_drops_stale_generation ... FAILED
+thread 'playback::tests::publish_buffer_drops_stale_generation' (12788) panicked at src\playback.rs:1251:9:
+assertion `left == right` failed: buffer da geração 1 chegou ao sink
+  left: [Generation(1), Generation(2)]
+ right: [Generation(2)]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+== Segunda revisao, item 2 -- Stop em Reconnecting e em Error ==
+Testes novos stop_from_reconnecting_goes_idle e stop_from_error_goes_idle
+(estado posto a mao em engine.inner). Mutacao: os bracos (Reconnecting, Stop)
+e (Error(_), Stop) removidos de Engine::send:
+$ cargo test --locked -- stop_from_
+test playback::tests::stop_from_reconnecting_goes_idle ... FAILED
+test playback::tests::stop_from_error_goes_idle ... FAILED
+thread 'playback::tests::stop_from_reconnecting_goes_idle' (35420) panicked at src\playback.rs:1266:9:
+  left: Err(InvalidTransition { from: Reconnecting, command: Stop })
+ right: Ok(())
+thread 'playback::tests::stop_from_error_goes_idle' (30832) panicked at src\playback.rs:1266:9:
+  left: Err(InvalidTransition { from: Error(Decode), command: Stop })
+ right: Ok(())
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+Fonte restaurado de copia (cmp igual); sem mutacao: 14 passed.
+
+== Bloco final -- matriz de mutacao contra o HEAD 8a88dde ==
+Cada mutacao aplicada por script (substituicao exata e unica no fonte), suite
+inteira rodada com "cargo test --locked -q" (timeout de 120 s), fonte restaurado
+no finally; depois: git status limpo e grep MUTANTE src/ = 0.
+Na primeira passada, M2 segurava o guard durante o push e travou em deadlock
+com SeekInsidePushSink. O processo foi encerrado e M2 passou a tomar e soltar
+o lock (drop(self.inner.lock())), que basta para o teste do lock.
+M1 sem cancel() na troca de geracao (advance_generation)
+  exit=101 ['test result: FAILED. 11 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: new_generation_cancels_old_workers, open_advances_generation_and_cancels_previous, stop_during_opening_cancels_everything
+M2 publish_buffer toma o lock de estado
+  exit=101 ['test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s']
+  pegos: publish_buffer_does_not_take_the_state_lock
+M3 PresentationGate::admits sempre admite
+  exit=101 ['test result: FAILED. 10 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: new_generation_cancels_old_workers, open_advances_generation_and_cancels_previous, seek_between_check_and_push_is_not_presented, seek_discards_stale_buffers
+M4 Open nao troca a geracao
+  exit=101 ['test result: FAILED. 9 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: event_overflow_drops_oldest_and_counts, every_transition_emits_state_changed, open_advances_generation_and_cancels_previous, repeated_stop_is_idempotent, stop_during_opening_cancels_everything
+M5 transition nao emite StateChanged
+  exit=101 ['test result: FAILED. 8 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: event_overflow_drops_oldest_and_counts, every_transition_emits_state_changed, repeated_stop_is_idempotent, stop_during_opening_cancels_everything, stop_from_error_goes_idle, stop_from_reconnecting_goes_idle
+M6 Seek nao guarda o estado de retomada
+  exit=101 ['test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: seek_while_paused_resumes_paused, seek_while_playing_resumes_playing
+M7 overflow nao conta em dropped_events
+  exit=101 ['test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: event_overflow_drops_oldest_and_counts
+M8 publish_buffer sem checagem de geracao ("if true")
+  exit=101 ['test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: publish_buffer_drops_stale_generation
+M9 sem os bracos de Stop em Reconnecting e Error
+  exit=101 ['test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: stop_from_error_goes_idle, stop_from_reconnecting_goes_idle
