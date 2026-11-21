@@ -45,3 +45,14 @@ thread 'playback::tests::seek_discards_stale_buffers' (26088) panicked at src\pl
   left: 1024
  right: 0
 Sem mutacao: 6 passed.
+
+== Achado 3 -- Open incrementa a geracao e cancela o token (spec 3.4) ==
+Teste novo open_advances_generation_and_cancels_previous, antes da correcao:
+$ cargo test --locked open_advances
+test playback::tests::open_advances_generation_and_cancels_previous ... FAILED
+thread 'playback::tests::open_advances_generation_and_cancels_previous' (19344) panicked at src\playback.rs:1005:9:
+assertion `left == right` failed: Open incrementa a geração
+  left: 0
+ right: 1
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+Depois: 7 passed.

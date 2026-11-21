@@ -335,6 +335,8 @@ impl Engine {
         match (inner.state, command) {
             (PlaybackState::Idle, Command::Open { autoplay, .. }) => {
                 inner.autoplay = autoplay;
+                // §3.4: Open incrementa a geração e cancela a anterior.
+                self.advance_generation(&mut inner);
                 inner.transition(PlaybackState::Opening, generation);
             }
             (PlaybackState::Opening, Command::Stop)
@@ -978,6 +980,41 @@ mod tests {
             presented_g1, 0,
             "buffer da geração 1 apresentado depois do Seek"
         );
+    }
+
+    /// §3.4: `Open` incrementa a geração e cancela o token da anterior.
+    ///
+    /// Given: o engine em Idle, com um worker registrado na geração vigente e
+    /// um buffer dessa geração pronto para apresentar.
+    /// When: `Open` é aplicado.
+    /// Then: a geração avança de um, o handle antigo vê o cancelamento e o
+    /// portão recusa o buffer da geração anterior.
+    #[test]
+    fn open_advances_generation_and_cancels_previous() {
+        let engine = Engine::new();
+        let before = engine.current_cancel();
+        let gate = engine.presentation_gate();
+        assert!(gate.admits(before.generation), "arranjo: geração vigente");
+
+        assert_eq!(
+            engine.send(Command::Open {
+                source: SourceRef::new(2),
+                autoplay: true,
+            }),
+            Ok(())
+        );
+
+        assert_eq!(
+            engine.snapshot().generation.value(),
+            before.generation.value() + 1,
+            "Open incrementa a geração"
+        );
+        assert!(before.is_cancelled(), "Open cancela o token anterior");
+        assert!(
+            !gate.admits(before.generation),
+            "buffer da geração anterior ao Open não é apresentado"
+        );
+        assert!(!engine.current_cancel().is_cancelled());
     }
 
     /// ENGINE-AC-05 / TASK-E01-03-AC-3: repeated stop é idempotente.
