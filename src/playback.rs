@@ -1216,6 +1216,82 @@ mod tests {
         );
     }
 
+    /// `publish_buffer` descarta, antes do sink, buffer de geração velha.
+    ///
+    /// Given: Playing na geração 1, e um Seek leva a geração a 2.
+    /// When: o produtor publica um buffer da geração 1 e depois um da 2.
+    /// Then: o ring do harness recebe só o da geração 2.
+    #[test]
+    fn publish_buffer_drops_stale_generation() {
+        let engine = engine_in(true, PlaybackState::Playing);
+        let g1 = engine.snapshot().generation;
+        assert_eq!(engine.send(Command::Seek), Ok(()));
+        let g2 = engine.snapshot().generation;
+        assert_ne!(g1, g2, "arranjo: o Seek trocou a geração");
+
+        let mut ring = SharedRing::default();
+        for generation in [g1, g2] {
+            engine.publish_buffer(
+                &mut ring,
+                PcmBuffer {
+                    generation,
+                    frames: 512,
+                },
+            );
+        }
+
+        let generations: Vec<Generation> = ring
+            .0
+            .lock()
+            // Teste: nenhum outro thread usa este ring.
+            .expect("ring do teste envenenado")
+            .iter()
+            .map(|buffer| buffer.generation)
+            .collect();
+        assert_eq!(generations, vec![g2], "buffer da geração 1 chegou ao sink");
+    }
+
+    /// Stop em `from`, posto à mão (nenhuma API pública leva o engine lá
+    /// nesta TASK): devolve `Ok`, chega a Idle e emite a sequência de §3.7.
+    fn assert_stop_from(from: PlaybackState) {
+        let engine = engine_in(true, PlaybackState::Playing);
+        engine
+            .inner
+            .lock()
+            // Teste: nenhum outro thread tocou o lock.
+            .expect("lock de estado livre no arranjo")
+            .state = from;
+        let generation = engine.snapshot().generation.value();
+        engine.drain_events();
+
+        assert_eq!(
+            engine.send(Command::Stop),
+            Ok(()),
+            "Stop aceito em {from:?}"
+        );
+        assert_eq!(engine.snapshot().state, PlaybackState::Idle);
+        assert_eq!(
+            engine.drain_events(),
+            vec![
+                changed(from, PlaybackState::Stopping, generation),
+                cancelled(generation),
+                changed(PlaybackState::Stopping, PlaybackState::Idle, generation + 1),
+            ]
+        );
+    }
+
+    /// §3.2: Stop sai de `Reconnecting` para Idle.
+    #[test]
+    fn stop_from_reconnecting_goes_idle() {
+        assert_stop_from(PlaybackState::Reconnecting);
+    }
+
+    /// §3.2: `Error` sai só por Stop → Idle (ENGINE-REQ-14).
+    #[test]
+    fn stop_from_error_goes_idle() {
+        assert_stop_from(PlaybackState::Error(ErrorKind::Decode));
+    }
+
     /// ENGINE-AC-05 / TASK-E01-03-AC-3: repeated stop é idempotente.
     ///
     /// Given: o estado em Idle depois de um Stop aplicado.

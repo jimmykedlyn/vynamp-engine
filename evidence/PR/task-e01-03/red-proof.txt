@@ -131,3 +131,30 @@ Error nao tem teste: nenhuma API publica leva o engine a Error.
 
 == Achado 9 -- debug_assert vacuo e parametro generation sem uso ==
 Corrigido junto com o achado 4 (commit ae0eaa4); o vermelho e o do bloco 4.
+
+== Segunda revisao, item 1 -- publish_buffer descarta geracao velha ==
+Teste novo publish_buffer_drops_stale_generation. Mutacao: a checagem de
+geracao de publish_buffer trocada por "if true {":
+$ cargo test --locked -- publish_buffer_drops_stale
+test playback::tests::publish_buffer_drops_stale_generation ... FAILED
+thread 'playback::tests::publish_buffer_drops_stale_generation' (12788) panicked at src\playback.rs:1251:9:
+assertion `left == right` failed: buffer da geração 1 chegou ao sink
+  left: [Generation(1), Generation(2)]
+ right: [Generation(2)]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+== Segunda revisao, item 2 -- Stop em Reconnecting e em Error ==
+Testes novos stop_from_reconnecting_goes_idle e stop_from_error_goes_idle
+(estado posto a mao em engine.inner). Mutacao: os bracos (Reconnecting, Stop)
+e (Error(_), Stop) removidos de Engine::send:
+$ cargo test --locked -- stop_from_
+test playback::tests::stop_from_reconnecting_goes_idle ... FAILED
+test playback::tests::stop_from_error_goes_idle ... FAILED
+thread 'playback::tests::stop_from_reconnecting_goes_idle' (35420) panicked at src\playback.rs:1266:9:
+  left: Err(InvalidTransition { from: Reconnecting, command: Stop })
+ right: Ok(())
+thread 'playback::tests::stop_from_error_goes_idle' (30832) panicked at src\playback.rs:1266:9:
+  left: Err(InvalidTransition { from: Error(Decode), command: Stop })
+ right: Ok(())
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+Fonte restaurado de copia (cmp igual); sem mutacao: 14 passed.
