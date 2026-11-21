@@ -1286,50 +1286,44 @@ mod tests {
     /// ENGINE-AC-03: nova geração cancela os workers da antiga antes do
     /// primeiro buffer novo (`new_generation_cancels_old_workers`).
     ///
-    /// Given: uma geração com o mesmo CancelToken em N workers.
-    /// When: a geração é incrementada (Seek, via Paused→Seeking da tabela).
-    /// Then: `is_cancelled()` é verdadeiro nos N handles antigos antes do
-    /// primeiro buffer da geração nova ser publicado.
+    /// Given: aberto com `autoplay: false`, já em Paused, com N workers
+    /// registrados no mesmo `CancelToken` da geração vigente.
+    /// When: Seek (Paused→Seeking da tabela) incrementa a geração.
+    /// Then: assim que o `send` devolve, e antes de qualquer buffer da
+    /// geração nova, os N handles antigos veem `is_cancelled()`, o handle da
+    /// geração nova não está cancelado e o portão já recusa a velha.
     #[test]
     fn new_generation_cancels_old_workers() {
-        let engine = Arc::new(Engine::new());
-        engine
-            .send(Command::Open {
-                source: SourceRef::new(11),
-                autoplay: false,
-            })
-            .expect("Idle→Opening é transição da tabela");
-        // §3.2: Buffering→Paused quando o pedido foi autoplay: false. Nesta
-        // TASK sem worker real, a chegada da marca de partida é o próprio
-        // teste agindo como orquestrador: Pause não se aplica em Buffering,
-        // então o arranjo usa o comando permitido — nenhum. O que a TASK
-        // controla é o token: registramos N handles da geração corrente e
-        // forçamos a troca de geração por Stop, que também cancela (§3.4).
-        let handles: Vec<CancelHandle> = (0..4).map(|_| engine.current_cancel()).collect();
-        assert!(handles.iter().all(|h| !h.is_cancelled()));
+        const WORKERS: usize = 4;
+        let engine = engine_in(false, PlaybackState::Paused);
+        let handles: Vec<CancelHandle> = (0..WORKERS).map(|_| engine.current_cancel()).collect();
+        assert!(handles.iter().all(|h| !h.is_cancelled()), "arranjo");
 
-        // Recusa fora da tabela é parte do contrato de ENGINE-AC-01:
-        // Seek em Buffering não existe na §3.2.
+        assert_eq!(engine.send(Command::Seek), Ok(()));
+
+        let cancelled = handles.iter().filter(|h| h.is_cancelled()).count();
+        assert_eq!(
+            cancelled, WORKERS,
+            "os N workers da geração velha veem o Seek"
+        );
+        let fresh = engine.current_cancel();
+        assert!(!fresh.is_cancelled(), "o token da geração nova está vivo");
+        assert_eq!(
+            fresh.generation.value(),
+            handles[0].generation.value() + 1,
+            "o Seek avançou a geração de um"
+        );
+        let gate = engine.presentation_gate();
+        assert!(!gate.admits(handles[0].generation));
+        assert!(gate.admits(fresh.generation));
+
+        // ENGINE-AC-01: Seek em Buffering não está na tabela de §3.2.
         assert!(matches!(
             engine.send(Command::Seek),
-            Err(Error::InvalidTransition { .. })
+            Err(Error::InvalidTransition {
+                from: PlaybackState::Buffering,
+                command: CommandKind::Seek,
+            })
         ));
-
-        engine
-            .send(Command::Stop)
-            .expect("Opening→Stopping→Idle é da tabela");
-
-        // Oráculo: TODOS os N handles antigos observam cancelamento, e o
-        // handle novo (pós-Stop) não está cancelado.
-        assert!(
-            handles.iter().all(|h| h.is_cancelled()),
-            "todos os N workers da geração velha veem is_cancelled()"
-        );
-        assert!(!engine.current_cancel().is_cancelled());
-        assert_ne!(
-            engine.current_cancel().generation,
-            handles[0].generation,
-            "a geração avançou"
-        );
     }
 }

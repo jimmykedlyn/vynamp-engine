@@ -109,3 +109,15 @@ thread 'playback::tests::event_overflow_drops_oldest_and_counts' (19988) panicke
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
 Depois da deduplicacao (EventQueue::push devolve se descartou; so publish conta):
 11 passed.
+
+== Achado 10 -- new_generation_cancels_old_workers (ENGINE-AC-03) cobre o Seek ==
+O comentario falava em "Pause em Buffering" e o teste trocava a geracao por
+Stop. Agora: Open autoplay:false, Paused, 4 handles, Seek. Mutacao do cancel()
+em Engine::advance_generation (ponto unico da troca de geracao):
+$ cargo test --locked new_generation
+test playback::tests::new_generation_cancels_old_workers ... FAILED
+thread 'playback::tests::new_generation_cancels_old_workers' (27596) panicked at src\playback.rs:1305:9:
+  left: 0
+ right: 4
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+Sem mutacao: 11 passed.
