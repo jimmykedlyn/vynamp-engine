@@ -158,3 +158,38 @@ thread 'playback::tests::stop_from_error_goes_idle' (30832) panicked at src\play
  right: Ok(())
 test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
 Fonte restaurado de copia (cmp igual); sem mutacao: 14 passed.
+
+== Bloco final -- matriz de mutacao contra o HEAD 8a88dde ==
+Cada mutacao aplicada por script (substituicao exata e unica no fonte), suite
+inteira rodada com "cargo test --locked -q" (timeout de 120 s), fonte restaurado
+no finally; depois: git status limpo e grep MUTANTE src/ = 0.
+Na primeira passada, M2 segurava o guard durante o push e travou em deadlock
+com SeekInsidePushSink. O processo foi encerrado e M2 passou a tomar e soltar
+o lock (drop(self.inner.lock())), que basta para o teste do lock.
+M1 sem cancel() na troca de geracao (advance_generation)
+  exit=101 ['test result: FAILED. 11 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: new_generation_cancels_old_workers, open_advances_generation_and_cancels_previous, stop_during_opening_cancels_everything
+M2 publish_buffer toma o lock de estado
+  exit=101 ['test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s']
+  pegos: publish_buffer_does_not_take_the_state_lock
+M3 PresentationGate::admits sempre admite
+  exit=101 ['test result: FAILED. 10 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: new_generation_cancels_old_workers, open_advances_generation_and_cancels_previous, seek_between_check_and_push_is_not_presented, seek_discards_stale_buffers
+M4 Open nao troca a geracao
+  exit=101 ['test result: FAILED. 9 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: event_overflow_drops_oldest_and_counts, every_transition_emits_state_changed, open_advances_generation_and_cancels_previous, repeated_stop_is_idempotent, stop_during_opening_cancels_everything
+M5 transition nao emite StateChanged
+  exit=101 ['test result: FAILED. 8 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: event_overflow_drops_oldest_and_counts, every_transition_emits_state_changed, repeated_stop_is_idempotent, stop_during_opening_cancels_everything, stop_from_error_goes_idle, stop_from_reconnecting_goes_idle
+M6 Seek nao guarda o estado de retomada
+  exit=101 ['test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: seek_while_paused_resumes_paused, seek_while_playing_resumes_playing
+M7 overflow nao conta em dropped_events
+  exit=101 ['test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: event_overflow_drops_oldest_and_counts
+M8 publish_buffer sem checagem de geracao ("if true")
+  exit=101 ['test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: publish_buffer_drops_stale_generation
+M9 sem os bracos de Stop em Reconnecting e Error
+  exit=101 ['test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s']
+  pegos: stop_from_error_goes_idle, stop_from_reconnecting_goes_idle
