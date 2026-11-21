@@ -75,3 +75,18 @@ thread 'playback::tests::repeated_stop_is_idempotent' (35784) panicked at src\pl
 test result: FAILED. 5 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 Depois: 8 passed. O parametro generation e o debug_assert vacuo de
 EngineInner::transition sairam: Engine::transition e o ponto unico de emissao.
+
+== Achado 5 -- Seek volta ao estado de antes, nao ao autoplay do Open ==
+Testes novos seek_while_paused_resumes_paused (Open autoplay:true, Pause, Seek)
+e seek_while_playing_resumes_playing (Open autoplay:false, Play, Seek):
+$ cargo test --locked -- seek_while
+test playback::tests::seek_while_playing_resumes_playing ... FAILED
+test playback::tests::seek_while_paused_resumes_paused ... FAILED
+thread 'playback::tests::seek_while_playing_resumes_playing' (7804) panicked at src\playback.rs:1171:9:
+  left: Paused
+ right: Playing
+thread 'playback::tests::seek_while_paused_resumes_paused' (32628) panicked at src\playback.rs:1158:9:
+  left: Playing
+ right: Paused
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+Depois: 10 passed.

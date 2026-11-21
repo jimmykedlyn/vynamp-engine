@@ -291,7 +291,10 @@ struct EngineInner {
     state: PlaybackState,
     generation: Generation,
     cancel: Arc<CancelToken>,
-    autoplay: bool,
+    /// Destino de `Buffering` quando o ring fica pronto: `Playing` ou
+    /// `Paused`. O `Open` grava pelo `autoplay`; o `Seek` grava o estado em
+    /// que chegou, para voltar a ele (§3.7).
+    resume: PlaybackState,
 }
 
 impl Default for Engine {
@@ -308,7 +311,7 @@ impl Engine {
                 state: PlaybackState::Idle,
                 generation: Generation::default(),
                 cancel: Arc::new(CancelToken::default()),
-                autoplay: true,
+                resume: PlaybackState::Playing,
             }),
             current: Arc::new(AtomicU64::new(Generation::default().value())),
             signal: Condvar::new(),
@@ -333,7 +336,11 @@ impl Engine {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match (inner.state, command) {
             (PlaybackState::Idle, Command::Open { autoplay, .. }) => {
-                inner.autoplay = autoplay;
+                inner.resume = if autoplay {
+                    PlaybackState::Playing
+                } else {
+                    PlaybackState::Paused
+                };
                 // §3.4: Open incrementa a geração e cancela a anterior. Idle
                 // não tem trabalho em voo, então não sai `Cancelled` (§3.7).
                 self.advance_generation(&mut inner);
@@ -352,7 +359,6 @@ impl Engine {
                 // sai com a geração que acabou de morrer.
                 let ended = self.advance_generation(&mut inner);
                 self.publish(Event::Cancelled { generation: ended });
-                inner.autoplay = true;
                 self.transition(&mut inner, PlaybackState::Idle);
             }
             (PlaybackState::Playing, Command::Pause) => {
@@ -362,6 +368,8 @@ impl Engine {
                 self.transition(&mut inner, PlaybackState::Playing);
             }
             (PlaybackState::Playing, Command::Seek) | (PlaybackState::Paused, Command::Seek) => {
+                // §3.7: depois do Seek volta ao estado em que ele chegou.
+                inner.resume = inner.state;
                 self.transition(&mut inner, PlaybackState::Seeking);
                 // §3.4: seek incrementa a geração; ring da geração velha é
                 // drenado pelo consumidor, não apresentado (E01-05 real).
@@ -406,7 +414,8 @@ impl Engine {
     /// `Buffering` sem comando de usuário (a tabela não tem comando nenhum
     /// que aceite `Buffering`).
     ///
-    /// Em `Open { autoplay: false }` o estado vai a `Paused`, não a `Playing`.
+    /// O destino é `Playing` ou `Paused`: depois de um `Open`, pelo
+    /// `autoplay`; depois de um `Seek`, o estado em que o `Seek` chegou.
     pub fn notify_ring_ready(&self) {
         let mut inner = self
             .inner
@@ -414,11 +423,7 @@ impl Engine {
             // Poço: leitura de estado consistente; transição segue a tabela.
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if inner.state == PlaybackState::Buffering {
-            let target = if inner.autoplay {
-                PlaybackState::Playing
-            } else {
-                PlaybackState::Paused
-            };
+            let target = inner.resume;
             self.transition(&mut inner, target);
         }
         // Fora de Buffering o gatilho não existe: no-op, sem evento.
@@ -1118,6 +1123,57 @@ mod tests {
         engine.notify_source_ready();
         engine.notify_ring_ready();
         assert_eq!(log.take(&engine), Vec::new());
+    }
+
+    /// Leva o engine até `target` (Playing ou Paused), passando pelo Open
+    /// com `autoplay` e, se preciso, por um Pause ou Play.
+    fn engine_in(autoplay: bool, target: PlaybackState) -> Engine {
+        let engine = Engine::new();
+        assert_eq!(
+            engine.send(Command::Open {
+                source: SourceRef::new(6),
+                autoplay,
+            }),
+            Ok(())
+        );
+        engine.notify_source_ready();
+        engine.notify_ring_ready();
+        let command = match (engine.snapshot().state, target) {
+            (PlaybackState::Playing, PlaybackState::Paused) => Some(Command::Pause),
+            (PlaybackState::Paused, PlaybackState::Playing) => Some(Command::Play),
+            _ => None,
+        };
+        if let Some(command) = command {
+            assert_eq!(engine.send(command), Ok(()));
+        }
+        assert_eq!(engine.snapshot().state, target, "arranjo");
+        engine
+    }
+
+    /// §3.7: Seek em Paused volta a Paused, mesmo aberto com `autoplay`.
+    ///
+    /// Given: aberto com `autoplay: true`, tocando e depois pausado.
+    /// When: Seek e o ring da geração nova fica pronto.
+    /// Then: o estado é Paused, o de antes do Seek.
+    #[test]
+    fn seek_while_paused_resumes_paused() {
+        let engine = engine_in(true, PlaybackState::Paused);
+        assert_eq!(engine.send(Command::Seek), Ok(()));
+        engine.notify_ring_ready();
+        assert_eq!(engine.snapshot().state, PlaybackState::Paused);
+    }
+
+    /// §3.7: Seek em Playing volta a Playing, mesmo aberto sem `autoplay`.
+    ///
+    /// Given: aberto com `autoplay: false`, pausado e depois tocando por Play.
+    /// When: Seek e o ring da geração nova fica pronto.
+    /// Then: o estado é Playing, o de antes do Seek.
+    #[test]
+    fn seek_while_playing_resumes_playing() {
+        let engine = engine_in(false, PlaybackState::Playing);
+        assert_eq!(engine.send(Command::Seek), Ok(()));
+        engine.notify_ring_ready();
+        assert_eq!(engine.snapshot().state, PlaybackState::Playing);
     }
 
     /// ENGINE-AC-05 / TASK-E01-03-AC-3: repeated stop é idempotente.
