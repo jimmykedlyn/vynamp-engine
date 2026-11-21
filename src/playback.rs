@@ -143,7 +143,9 @@ impl Generation {
 /// Token de cancelamento compartilhado pelos workers de uma geração
 /// (`specs/engine.md` §3.4).
 ///
-/// Consulta cooperativa e barata (load `Relaxed`); a callback de áudio nunca o
+/// Consulta cooperativa e barata: `cancel` grava com `Release` e `is_cancelled`
+/// lê com `Acquire`, então quem vê o token cancelado vê também o que foi escrito
+/// antes do cancelamento (a geração nova, em `Engine`). A callback de áudio nunca o
 /// usa — ela compara a geração do buffer.
 #[derive(Debug, Default)]
 pub struct CancelToken {
@@ -158,12 +160,12 @@ impl CancelToken {
 
     /// Cancela o token; todos os workers da geração observam em seguida.
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        self.cancelled.store(true, Ordering::Release);
     }
 
     /// Verdadeiro depois de [`CancelToken::cancel`].
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 

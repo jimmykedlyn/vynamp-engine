@@ -90,3 +90,9 @@ thread 'playback::tests::seek_while_paused_resumes_paused' (32628) panicked at s
  right: Paused
 test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
 Depois: 10 passed.
+
+== Achado 6 -- CancelToken Release/Acquire ==
+Sem vermelho: a diferenca entre Relaxed e Release/Acquire nao e observavel de
+forma deterministica em x86-64 (TSO) num teste de processo. Nenhum teste novo
+foi escrito para isso, para nao registrar como TDD um teste verde de primeira.
+Coberto por revisao do codigo.
