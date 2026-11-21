@@ -144,6 +144,66 @@ com checkpoint em disco, lease por job, progresso e pools limitados. Os nomes
 TASK e voltam a esta seção quando ela sair de `planned`; aqui fica só a garantia de
 ENGINE-REQ-12.
 
+### 3.7 O que a TASK-E01-03 publica hoje
+
+> Descreve o código de `src/playback.rs`, não um desenho. Continua rascunho como o resto
+> de §3: registra onde a implementação diverge de §3.1–§3.5 e a API que ela precisou
+> acrescentar. Mudança no código volta aqui no mesmo PR.
+
+**Subconjuntos de §3.3, §3.5 e §6.**
+
+- `Command` tem só `Open { source: SourceRef, autoplay: bool }`, `Play`, `Pause`, `Stop`
+  e `Seek`. `Open` não leva `start` e `Seek` não leva alvo, porque `MediaTime` (§3.1)
+  ainda não existe no crate. Resolver tempo em byte/frame é do `vynamp-decode`
+  (TASK-E01-04). `Enqueue`, `SetVolume` e `SetTransition` não existem.
+  `Command::kind() -> CommandKind` dá o tipo do comando (`Open`, `Play`, `Pause`,
+  `Stop`, `Seek`) para `Error::InvalidTransition`.
+- `Event` tem `StateChanged { from, to, generation }` e uma variante a mais que §3.3:
+  `Cancelled { generation }`, emitida quando a geração `generation` é cancelada.
+  `TrackStarted`, `TrackEnded`, `GaplessDegraded`, `Underrun` e `Error` não existem.
+- Os eventos ficam numa fila limitada a 64 dentro do `Engine`. Quando ela enche, o
+  evento mais antigo é descartado e conta em `Snapshot::dropped_events`.
+  `Engine::drain_events() -> Vec<Event>` drena a fila na ordem de emissão.
+  `Engine::wait_events(Duration) -> Vec<Event>` espera até o prazo por pelo menos um
+  evento e serve a testes e hosts. Nenhuma das duas é caminho de áudio.
+- `Snapshot` tem `state`, `generation` e `dropped_events`. `position` e `underruns`
+  chegam com o relógio e o ring (TASK-E01-05).
+- `Error` tem `InvalidTransition { from, command }`, `InvalidArgument(&'static str)` e
+  `Cancelled`. As variantes que embrulham erro de outra lib chegam com a dependência.
+- `PlaybackState::Error` carrega um `ErrorKind` (`Decode`, `Output` ou `Io`).
+- `PlaybackState::is_active()` é falso só em `Idle`, `DeviceLost` e `Error`.
+- `Generation::value() -> u64` expõe o número para transporte.
+
+**Fonte.** `SourceRef { id: u64 }`, com `SourceRef::new(u64)`, é um identificador opaco
+que substitui o handle do `vynamp-decode` até a TASK-E01-04 fixar esse handle.
+
+**Gatilhos internos de §3.2.** Nenhum comando aceita `Opening` ou `Buffering`. Quem sai
+deles é o orquestrador:
+
+- `Engine::notify_source_ready()` faz `Opening → Buffering` (fonte demuxada).
+- `Engine::notify_ring_ready()` faz `Buffering → Playing` ou `Paused` (ring na marca de
+  partida).
+- Fora do estado de origem, as duas são no-op e não emitem evento.
+- Sem worker real nesta TASK, `Seeking → Buffering` e `Stopping → Idle` acontecem dentro
+  do próprio `send`.
+
+**Cancelamento.**
+
+- `CancelToken::new`, `cancel` e `is_cancelled` seguem §3.4.
+- `Engine::current_cancel() -> CancelHandle` entrega ao worker que se registra a
+  geração vigente (`CancelHandle::generation`) e uma leitura ao vivo do token dessa
+  geração (`CancelHandle::is_cancelled`).
+
+**Transporte de buffer.** Não é o ring de E01-05: é o mínimo para provar o descarte por
+geração.
+
+- `PcmBuffer { generation: Generation, frames: u64 }` é o buffer marcado com a geração
+  que o produziu.
+- `trait BufferSink { fn push(&mut self, buffer: PcmBuffer); }` é a porta onde o buffer
+  entra.
+- `Engine::publish_buffer(&self, &mut dyn BufferSink, PcmBuffer)` entrega ao sink só o
+  buffer da geração vigente.
+
 ## 4. Requisitos
 
 > Autorado em 2026-11-11. **Não aprovado.** Cada requisito aponta para o critério de §5
