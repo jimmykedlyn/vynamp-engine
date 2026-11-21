@@ -15,9 +15,17 @@
 //!
 //! # Real time
 //!
-//! A callback de áudio nunca bloqueia: compara a geração do buffer e descarta.
-//! Cancelamento é consultado por polling cooperativo nos workers, nunca por
-//! lock dentro de caminho de áudio.
+//! O lado que apresenta compara a geração de cada buffer com
+//! `PresentationGate::admits` (load atômico, sem lock nem alocação) e descarta
+//! a geração velha. O ponto de linearização é esse load: um período que já foi
+//! admitido antes de um `Seek` ou `Stop` termina de tocar; nenhum buffer da
+//! geração velha é admitido depois. `Engine::publish_buffer` também compara sem
+//! lock, mas é só filtro antecipado: um buffer pode ficar velho entre a
+//! comparação e o `push`, e quem o descarta é o portão.
+//!
+//! Cancelamento é consultado por polling cooperativo nos workers. O lock de
+//! estado do `Engine` só é tomado por comandos, gatilhos e leituras de
+//! diagnóstico, nunca por `publish_buffer` nem pelo portão.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

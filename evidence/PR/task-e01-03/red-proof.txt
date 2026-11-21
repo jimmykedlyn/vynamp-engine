@@ -16,3 +16,32 @@ assertion `left == right` failed: cada worker sai por ver o token cancelado
  right: [Cancelled, Cancelled]
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
 Sem mutacao: 1 passed.
+
+== Achado 2 -- publish_buffer sem lock + TOCTOU (ENGINE-AC-04) ==
+(a) Vermelho no contrato antigo (publish_buffer com Mutex; consumidor apresenta o
+ring cru, porque o portao ainda nao existia). Testes novos:
+publish_buffer_does_not_take_the_state_lock (lock de estado segurado pelo teste)
+e seek_between_check_and_push_is_not_presented (sink de teste aplica Seek dentro
+do push, entre a checagem e a entrada no ring):
+$ cargo test --locked -- publish_buffer_does_not seek_between
+test playback::tests::seek_between_check_and_push_is_not_presented ... FAILED
+test playback::tests::publish_buffer_does_not_take_the_state_lock ... FAILED
+thread 'playback::tests::seek_between_check_and_push_is_not_presented' (26552) panicked at src\playback.rs:921:9:
+  left: 512
+ right: 0
+thread 'playback::tests::publish_buffer_does_not_take_the_state_lock' (31028) panicked at src\playback.rs:855:9:
+publish_buffer esperou o lock de estado do Engine
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 4 filtered out; finished in 2.01s
+(b) Depois do verde, o contrato do consumidor mudou: ele apresenta pelo
+PresentationGate::admits. Mutacao do portao para sempre admitir
+("{ let _ = (generation, &self.current); true } // MUTANTE"):
+$ cargo test --locked
+test playback::tests::seek_between_check_and_push_is_not_presented ... FAILED
+test playback::tests::seek_discards_stale_buffers ... FAILED
+thread 'playback::tests::seek_between_check_and_push_is_not_presented' (35036) panicked at src\playback.rs:970:9:
+  left: 512
+ right: 0
+thread 'playback::tests::seek_discards_stale_buffers' (26088) panicked at src\playback.rs:851:9:
+  left: 1024
+ right: 0
+Sem mutacao: 6 passed.

@@ -264,6 +264,9 @@ pub trait BufferSink {
 /// evento e incrementa o contador de `Snapshot::dropped_events`.
 pub struct Engine {
     inner: Mutex<EngineInner>,
+    /// Cópia atômica de `EngineInner::generation`, escrita só com o lock de
+    /// estado tomado e lida sem lock por `publish_buffer` e `PresentationGate`.
+    current: Arc<AtomicU64>,
     /// Sinaliza que o produtor publicou um estado novo (não é caminho RT).
     signal: Condvar,
     events: Mutex<EventQueue>,
@@ -307,6 +310,7 @@ impl Engine {
                 cancel: Arc::new(CancelToken::default()),
                 autoplay: true,
             }),
+            current: Arc::new(AtomicU64::new(Generation::default().value())),
             signal: Condvar::new(),
             events: Mutex::new(EventQueue {
                 queue: std::collections::VecDeque::new(),
@@ -340,13 +344,11 @@ impl Engine {
             | (PlaybackState::Seeking, Command::Stop)
             | (PlaybackState::Reconnecting, Command::Stop)
             | (PlaybackState::Error(_), Command::Stop) => {
-                inner.cancel.cancel();
                 inner.transition(PlaybackState::Stopping, generation);
                 // §3.2: Stopping → Idle é a geração encerrada; sem worker real
                 // nesta TASK, a transição é imediata e o evento de cancelamento
                 // sai com a geração que acabou de morrer.
-                inner.cancel = Arc::new(CancelToken::default());
-                inner.generation = Generation(inner.generation.value() + 1);
+                self.advance_generation(&mut inner);
                 inner.transition(PlaybackState::Idle, generation);
                 inner.autoplay = true;
                 self.publish(Event::Cancelled { generation });
@@ -358,12 +360,10 @@ impl Engine {
                 inner.transition(PlaybackState::Playing, generation);
             }
             (PlaybackState::Playing, Command::Seek) | (PlaybackState::Paused, Command::Seek) => {
-                inner.cancel.cancel();
                 inner.transition(PlaybackState::Seeking, generation);
                 // §3.4: seek incrementa a geração; ring da geração velha é
                 // drenado pelo consumidor, não apresentado (E01-05 real).
-                inner.cancel = Arc::new(CancelToken::default());
-                inner.generation = Generation(inner.generation.value() + 1);
+                self.advance_generation(&mut inner);
                 inner.transition(PlaybackState::Buffering, generation);
                 self.publish(Event::Cancelled { generation });
             }
@@ -488,21 +488,39 @@ impl Engine {
         }
     }
 
-    /// Publica um buffer no sink, descartando geração velha.
+    /// Publica um buffer no sink se ele for da geração vigente.
     ///
-    /// O domínio não conhece o sink além da trait [`BufferSink`]; a regra de
-    /// descarte vive aqui para que nenhum consumidor precise reimplementá-la.
+    /// Sem lock: a comparação é um load `Acquire` da geração atômica. É um
+    /// filtro antecipado, não a garantia de ENGINE-AC-04 — uma troca de
+    /// geração entre a comparação e o `push` deixa entrar no sink um buffer
+    /// que já é velho. Quem apresenta descarta esse buffer com
+    /// [`PresentationGate::admits`].
     pub fn publish_buffer(&self, sink: &mut dyn BufferSink, buffer: PcmBuffer) {
-        let inner = self
-            .inner
-            .lock()
-            // Poço: comparação de geração é leitura de valor consistente.
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if buffer.generation == inner.generation && !inner.cancel.is_cancelled() {
-            drop(inner);
+        if buffer.generation.value() == self.current.load(Ordering::Acquire) {
             sink.push(buffer);
         }
-        // Geração velha ou cancelada: descartada sem chegar ao sink.
+        // Geração velha: descartada sem chegar ao sink.
+    }
+
+    /// Portão da geração vigente para quem apresenta buffers (`§3.7`).
+    ///
+    /// O handle é clonável e não segura o `Engine`; a consulta é um load
+    /// atômico, sem lock nem alocação.
+    pub fn presentation_gate(&self) -> PresentationGate {
+        PresentationGate {
+            current: Arc::clone(&self.current),
+        }
+    }
+
+    /// Troca a geração na ordem de §3.7: grava a geração nova (`Release`),
+    /// cancela o token da velha e cria o token da nova. Quem observa o token
+    /// velho cancelado (`Acquire`) já lê a geração nova.
+    fn advance_generation(&self, inner: &mut EngineInner) {
+        let next = Generation(inner.generation.value() + 1);
+        inner.generation = next;
+        self.current.store(next.value(), Ordering::Release);
+        inner.cancel.cancel();
+        inner.cancel = Arc::new(CancelToken::default());
     }
 
     fn publish(&self, event: Event) {
@@ -519,6 +537,27 @@ impl Engine {
         events.push(event);
         drop(events);
         self.signal.notify_all();
+    }
+}
+
+/// Portão de apresentação: diz se um buffer ainda é da geração vigente.
+///
+/// É a garantia de ENGINE-AC-04 no lado que apresenta. Quem apresenta (a
+/// callback, em E01-05) chama [`PresentationGate::admits`] com a geração de
+/// cada buffer no momento de apresentá-lo e descarta o recusado. O ponto de
+/// linearização é o load: um período que já passou por `admits` antes do
+/// incremento termina o buffer admitido; depois do incremento, nenhum buffer
+/// da geração velha é admitido.
+#[derive(Clone, Debug)]
+pub struct PresentationGate {
+    current: Arc<AtomicU64>,
+}
+
+impl PresentationGate {
+    /// Verdadeiro se `generation` é a geração vigente. Load `Acquire`, sem
+    /// lock nem alocação: pode ser chamado da callback de tempo real.
+    pub fn admits(&self, generation: Generation) -> bool {
+        generation.value() == self.current.load(Ordering::Acquire)
     }
 }
 
@@ -568,6 +607,7 @@ pub struct Snapshot {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+    use std::time::Duration;
 
     /// Oráculo independente: conta frames apresentados **por geração**, fora do
     /// código sob teste. A expectativa vem do que a fixture declarou produzir,
@@ -778,21 +818,28 @@ mod tests {
         let g2 = engine.snapshot().generation;
         assert_eq!(g2.value(), g1.value() + 1, "seek incrementa a geração");
 
-        // Buffers velhos ainda no ring + buffers novos da geração 2: o
-        // consumidor drena tudo; o oráculo conta só o que passou pelo sink.
-        let mut oracle = OracleSink::default();
-        for buffer in ring.drain(..) {
-            engine.publish_buffer(&mut oracle, buffer);
-        }
+        // A geração 2 publica no mesmo ring, atrás dos dois buffers velhos.
         let new_buffers = 3;
+        let mut producer_sink = RingSink { ring: &mut ring };
         for _ in 0..new_buffers {
             engine.publish_buffer(
-                &mut oracle,
+                &mut producer_sink,
                 PcmBuffer {
                     generation: g2,
                     frames: 512,
                 },
             );
+        }
+        assert_eq!(ring.len(), 5, "ring com 2 buffers de g1 e 3 de g2");
+
+        // Consumidor do harness: drena o ring até o último frame e apresenta
+        // o que o portão admite no momento de apresentar.
+        let gate = engine.presentation_gate();
+        let mut oracle = OracleSink::default();
+        for buffer in ring.drain(..) {
+            if gate.admits(buffer.generation) {
+                oracle.push(buffer);
+            }
         }
 
         // Oráculo: exatamente os buffers da geração 2, nenhum da geração 1.
@@ -805,6 +852,131 @@ mod tests {
             oracle.total_for(g1),
             0,
             "nenhum frame da geração velha é apresentado depois do seek"
+        );
+    }
+
+    /// `publish_buffer` está no caminho do produtor de tempo real (§3.4/§6):
+    /// não pode esperar o lock de estado do `Engine`.
+    ///
+    /// Given: o lock de estado segurado por outro thread (aqui, o teste).
+    /// When: um produtor publica um buffer da geração vigente.
+    /// Then: a publicação termina sem esperar o lock e o buffer chega ao ring.
+    #[test]
+    fn publish_buffer_does_not_take_the_state_lock() {
+        let engine = Arc::new(Engine::new());
+        engine
+            .send(Command::Open {
+                source: SourceRef::new(5),
+                autoplay: true,
+            })
+            .expect("Idle→Opening é transição da tabela");
+        let generation = engine.snapshot().generation;
+        let ring = SharedRing::default();
+
+        let guard = engine
+            .inner
+            .lock()
+            // Teste: nenhum outro thread tocou o lock ainda.
+            .expect("lock de estado livre no arranjo");
+        let (done_tx, done_rx) = mpsc::channel();
+        let producer = {
+            let engine = Arc::clone(&engine);
+            let mut ring = ring.clone();
+            std::thread::spawn(move || {
+                engine.publish_buffer(
+                    &mut ring,
+                    PcmBuffer {
+                        generation,
+                        frames: 512,
+                    },
+                );
+                done_tx.send(()).ok();
+            })
+        };
+        let finished = done_rx.recv_timeout(Duration::from_secs(2));
+        // Solta o lock antes do join: no vermelho o produtor está preso nele.
+        drop(guard);
+        assert!(
+            producer.join().is_ok(),
+            "produtor de teste entrou em pânico"
+        );
+
+        assert!(
+            finished.is_ok(),
+            "publish_buffer esperou o lock de estado do Engine"
+        );
+        assert_eq!(ring.len(), 1, "buffer da geração vigente entra no ring");
+    }
+
+    /// Sink de teste que aplica um `Seek` dentro do `push`, antes de guardar
+    /// o buffer: abre de forma determinística a janela entre a checagem de
+    /// geração de `publish_buffer` e a entrada do buffer no ring.
+    struct SeekInsidePushSink {
+        engine: Arc<Engine>,
+        seek: Option<Result<(), Error>>,
+        ring: Vec<PcmBuffer>,
+    }
+
+    impl BufferSink for SeekInsidePushSink {
+        fn push(&mut self, buffer: PcmBuffer) {
+            self.seek = Some(self.engine.send(Command::Seek));
+            self.ring.push(buffer);
+        }
+    }
+
+    /// ENGINE-AC-04, a janela TOCTOU: um Seek entre a checagem e o push.
+    ///
+    /// Given: Playing na geração 1; o produtor publica um buffer da geração 1
+    /// e o Seek é aplicado depois da checagem, antes de o buffer entrar no ring.
+    /// When: o consumidor apresenta o ring.
+    /// Then: nenhum frame da geração 1 é apresentado (oráculo: frames somados
+    /// pelo consumidor do harness).
+    #[test]
+    fn seek_between_check_and_push_is_not_presented() {
+        let engine = Arc::new(Engine::new());
+        engine
+            .send(Command::Open {
+                source: SourceRef::new(9),
+                autoplay: true,
+            })
+            .expect("Idle→Opening é transição da tabela");
+        engine.notify_source_ready();
+        engine.notify_ring_ready();
+        assert_eq!(engine.snapshot().state, PlaybackState::Playing);
+        let g1 = engine.snapshot().generation;
+
+        let mut sink = SeekInsidePushSink {
+            engine: Arc::clone(&engine),
+            seek: None,
+            ring: Vec::new(),
+        };
+        engine.publish_buffer(
+            &mut sink,
+            PcmBuffer {
+                generation: g1,
+                frames: 512,
+            },
+        );
+        assert_eq!(
+            sink.seek,
+            Some(Ok(())),
+            "o Seek dentro do push foi aplicado"
+        );
+        assert_ne!(engine.snapshot().generation, g1, "o Seek trocou a geração");
+
+        // Consumidor do harness: apresenta o que o portão admite no momento
+        // de apresentar; o oráculo soma os frames de g1 apresentados.
+        let gate = engine.presentation_gate();
+        let presented_g1: u64 = sink
+            .ring
+            .iter()
+            .filter(|buffer| gate.admits(buffer.generation))
+            .filter(|buffer| buffer.generation == g1)
+            .map(|buffer| buffer.frames)
+            .sum();
+        assert_eq!(
+            presented_g1, 0,
+            "buffer da geração 1 apresentado depois do Seek"
         );
     }
 
