@@ -1,0 +1,18 @@
+Prova do vermelho -- correcao do review da TASK-E01-03 (um bloco por achado)
+Base: 7d814d9. Mutacoes aplicadas a mao no fonte, rodadas e revertidas (git diff
+conferido limpo em src/ depois de cada uma). Variavel de ambiente nao serve:
+nao chega ao binario de teste.
+
+== Achado 1 -- stop_during_opening_cancels_everything (AC-1 / ENGINE-AC-02) ==
+Antes (teste antigo): mutacao "// MUTANTE: inner.cancel.cancel();" no braco
+Stop de Engine::send; cargo test --locked stop_during_opening
+  -> 1 passed  (o teste antigo era vacuo: verde sem o cancelamento)
+Depois (teste novo: handles pegos em Opening, barreira, SharedRing do harness,
+WorkerExit contado pelo harness, Result do Stop assertado), mesma mutacao:
+$ cargo test --locked stop_during_opening
+thread 'playback::tests::stop_during_opening_cancels_everything' (25872) panicked at src\playback.rs:716:9:
+assertion `left == right` failed: cada worker sai por ver o token cancelado
+  left: [Exhausted, Exhausted]
+ right: [Cancelled, Cancelled]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+Sem mutacao: 1 passed.

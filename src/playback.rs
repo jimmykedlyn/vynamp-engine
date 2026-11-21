@@ -567,9 +567,7 @@ pub struct Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::mpsc;
-    use std::time::Duration;
 
     /// Oráculo independente: conta frames apresentados **por geração**, fora do
     /// código sob teste. A expectativa vem do que a fixture declarou produzir,
@@ -596,51 +594,90 @@ mod tests {
         }
     }
 
-    /// Worker de decode de teste: produz `buffers` buffers de `frames` frames,
-    /// checando o token a cada buffer, como o produtor real faria.
-    fn decode_worker(
-        engine: Arc<Engine>,
-        generation: Generation,
-        buffers: usize,
-        frames: u64,
-        tx: mpsc::Sender<Generation>,
-    ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            for _ in 0..buffers {
-                let handle = engine.current_cancel();
-                // O worker só publica no ring da SUA geração; se a geração
-                // vigente mudou ou o token foi cancelado, ele retorna cedo.
-                if handle.generation != generation || handle.is_cancelled() {
-                    tx.send(generation).ok();
-                    return;
-                }
-                engine.publish_buffer(&mut discard_sink(), PcmBuffer { generation, frames });
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            tx.send(generation).ok();
-        })
+    /// Ring de teste compartilhado entre os workers e o harness. O `Mutex` é
+    /// do harness, não do domínio: o oráculo lê o que de fato entrou.
+    #[derive(Clone, Default)]
+    struct SharedRing(Arc<Mutex<Vec<PcmBuffer>>>);
+
+    impl SharedRing {
+        fn len(&self) -> usize {
+            self.0
+                .lock()
+                // Teste: poço só se outro thread do teste entrou em pânico,
+                // e aí o teste já falhou.
+                .expect("ring do teste envenenado")
+                .len()
+        }
     }
 
-    fn discard_sink() -> impl BufferSink {
-        struct Discard;
-        impl BufferSink for Discard {
-            fn push(&mut self, _buffer: PcmBuffer) {}
+    impl BufferSink for SharedRing {
+        fn push(&mut self, buffer: PcmBuffer) {
+            self.0
+                .lock()
+                // Teste: idem `len`.
+                .expect("ring do teste envenenado")
+                .push(buffer);
         }
-        Discard
+    }
+
+    /// Motivo pelo qual um worker de teste retornou, contado pelo harness.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum WorkerExit {
+        /// Viu o próprio token cancelado antes de publicar o próximo buffer.
+        Cancelled,
+        /// Publicou todos os buffers sem nunca ver o token cancelado.
+        Exhausted,
+    }
+
+    /// Worker de teste (decode ou I/O): espera a barreira, depois tenta
+    /// publicar até `buffers` buffers, consultando **só o próprio handle**
+    /// antes de cada um. O handle vem pronto do thread principal, então o
+    /// worker não relê a geração vigente: se o `Stop` não cancelar o token,
+    /// o worker não tem outro jeito de saber e sai por `Exhausted`.
+    fn gated_worker(
+        engine: Arc<Engine>,
+        handle: CancelHandle,
+        start: Arc<std::sync::Barrier>,
+        mut ring: SharedRing,
+        buffers: usize,
+        exits: mpsc::Sender<WorkerExit>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            start.wait();
+            for _ in 0..buffers {
+                if handle.is_cancelled() {
+                    exits.send(WorkerExit::Cancelled).ok();
+                    return;
+                }
+                engine.publish_buffer(
+                    &mut ring,
+                    PcmBuffer {
+                        generation: handle.generation,
+                        frames: 512,
+                    },
+                );
+            }
+            exits.send(WorkerExit::Exhausted).ok();
+        })
     }
 
     /// ENGINE-AC-02 / TASK-E01-03-AC-1: Stop durante Opening cancela tudo.
     ///
-    /// Given: state machine em Opening com produtor de decode emitindo buffers
-    /// e workers de I/O vivos.
-    /// When: Stop chega antes do primeiro buffer entrar no ring e o teste
-    /// espera todos os workers terminarem.
-    /// Then: todos os workers terminam (cancelados), o estado chega a Idle e
-    /// NENHUM frame entra no ring — contado pelo oráculo, não pelo domínio.
+    /// Given: Opening com um produtor de decode e um worker de I/O vivos, cada
+    /// um com o handle da geração vigente e parado numa barreira antes do
+    /// primeiro buffer.
+    /// When: Stop é aplicado, a barreira abre e o teste espera os workers.
+    /// Then: o estado é Idle, nenhum buffer entrou no ring (oráculo: o ring
+    /// do harness) e cada worker saiu porque viu o token cancelado, não por
+    /// ter esgotado os buffers (oráculo: o canal de saída do harness).
     #[test]
     fn stop_during_opening_cancels_everything() {
+        const WORKERS: usize = 2;
+        // Muito mais buffers do que o worker publicaria se fosse cancelado:
+        // sem cancelamento ele esgota e reporta `Exhausted`, sem travar.
+        const BUFFERS_PER_WORKER: usize = 1_000;
+
         let engine = Arc::new(Engine::new());
-        let (tx, rx) = mpsc::channel();
         engine
             .send(Command::Open {
                 source: SourceRef::new(1),
@@ -649,57 +686,40 @@ mod tests {
             // Invariante: Idle→Opening está na tabela de §3.2.
             .expect("Idle→Opening é transição da tabela");
         assert_eq!(engine.snapshot().state, PlaybackState::Opening);
+        engine.drain_events();
 
-        let g0 = engine.snapshot().generation;
-        let producers = vec![
-            decode_worker(engine.clone(), g0, 8, 512, tx.clone()),
-            decode_worker(engine.clone(), g0, 8, 512, tx.clone()),
-        ];
-        drop(tx);
-
-        // Stop antes do primeiro buffer entrar no ring.
-        engine.send(Command::Stop).ok();
-        let mut oracle = OracleSink::default();
-        // Nenhum buffer de geração 0 sobrevive ao Stop: publica de novo os
-        // buffers "em voo" — o domínio deve descartar todos.
-        for _ in 0..8 {
-            engine.publish_buffer(
-                &mut oracle,
-                PcmBuffer {
-                    generation: g0,
-                    frames: 512,
-                },
-            );
-        }
-
-        for worker in producers {
-            // Prazo de §6: worker preso é abandonado; aqui esperamos retorno.
-            worker.join().ok();
-        }
-        let finished: Vec<Generation> = rx.try_iter().collect();
-        // Os dois workers terminaram — cancelados ou completos, mas terminaram.
-        assert_eq!(finished.len(), 2, "workers de I/O devem terminar");
-
-        // Oráculo: nenhum frame da geração 0 chegou ao sink depois do Stop.
-        assert_eq!(
-            oracle.total_for(g0),
-            0,
-            "nenhum frame da geração cancelada pode ser apresentado"
-        );
-        // Estado final é Idle e a geração avançou (Stop incrementa).
-        let snap = engine.snapshot();
-        assert_eq!(snap.state, PlaybackState::Idle);
-        assert_eq!(snap.generation.value(), g0.value() + 1);
-        // Evento de cancelamento saiu uma única vez, com a geração morta.
-        let events = engine.drain_events();
-        let cancelled: Vec<_> = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::Cancelled { generation } => Some(*generation),
-                _ => None,
+        let ring = SharedRing::default();
+        let start = Arc::new(std::sync::Barrier::new(WORKERS + 1));
+        let (exits_tx, exits_rx) = mpsc::channel();
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                gated_worker(
+                    Arc::clone(&engine),
+                    engine.current_cancel(),
+                    Arc::clone(&start),
+                    ring.clone(),
+                    BUFFERS_PER_WORKER,
+                    exits_tx.clone(),
+                )
             })
             .collect();
-        assert_eq!(cancelled, vec![g0], "um Cancelled com a geração morta");
+        drop(exits_tx);
+
+        // Stop aplicado com os workers vivos e ainda sem nenhum buffer.
+        assert_eq!(engine.send(Command::Stop), Ok(()));
+        start.wait();
+        for worker in workers {
+            assert!(worker.join().is_ok(), "worker de teste entrou em pânico");
+        }
+
+        let exits: Vec<WorkerExit> = exits_rx.try_iter().collect();
+        assert_eq!(
+            exits,
+            vec![WorkerExit::Cancelled; WORKERS],
+            "cada worker sai por ver o token cancelado"
+        );
+        assert_eq!(ring.len(), 0, "nenhum buffer entra no ring depois do Stop");
+        assert_eq!(engine.snapshot().state, PlaybackState::Idle);
     }
 
     /// ENGINE-AC-04 / TASK-E01-03-AC-2: seek/troca descarta buffers antigos.
