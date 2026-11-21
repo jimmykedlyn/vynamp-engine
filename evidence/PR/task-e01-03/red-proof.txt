@@ -1,7 +1,9 @@
 Prova do vermelho -- correcao do review da TASK-E01-03 (um bloco por achado)
-Base: 7d814d9. Mutacoes aplicadas a mao no fonte, rodadas e revertidas (git diff
-conferido limpo em src/ depois de cada uma). Variavel de ambiente nao serve:
-nao chega ao binario de teste.
+Base: 7d814d9. Mutacoes aplicadas a mao no fonte (sed numa linha), rodadas e
+revertidas. Cada reversao foi conferida com sed -n na linha e com a suite verde,
+e no fim "grep -rn MUTANTE src/" voltou vazio. git diff nao serviu de prova: a
+arvore tinha o teste ou a correcao ainda nao commitados durante a mutacao.
+Variavel de ambiente nao serve: nao chega ao binario de teste.
 
 == Achado 1 -- stop_during_opening_cancels_everything (AC-1 / ENGINE-AC-02) ==
 Antes (teste antigo): mutacao "// MUTANTE: inner.cancel.cancel();" no braco
@@ -121,3 +123,11 @@ thread 'playback::tests::new_generation_cancels_old_workers' (27596) panicked at
  right: 4
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
 Sem mutacao: 11 passed.
+
+== Achado 7 -- API fora de 3 documentada na spec ==
+So docs: commits 448fd18 e ac39fba (specs/engine.md 3.7) e a frase de
+TASK-E01-03.md sobre 5 aprovada. Sem teste. Cancelled em Stop a partir de
+Error nao tem teste: nenhuma API publica leva o engine a Error.
+
+== Achado 9 -- debug_assert vacuo e parametro generation sem uso ==
+Corrigido junto com o achado 4 (commit ae0eaa4); o vermelho e o do bloco 4.

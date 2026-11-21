@@ -1,8 +1,9 @@
 //! vynamp-engine
 //!
 //! Específico deste módulo: ver [specs/](specs/) no próprio repo —
-//! [`specs/engine.md`](specs/engine.md) §3.2–§3.4 (aprovada 2026-11-18) fixa os
-//! tipos de domínio que este crate publica.
+//! [`specs/engine.md`](specs/engine.md) §3.2–§3.4 e §3.7 descrevem os tipos de
+//! domínio que este crate publica. §3 é rascunho; só §5 foi aprovada, em
+//! 2026-11-18.
 //!
 //! Este crate integra decode, dsp, output e encode num grafo de reprodução com
 //! estado, comandos e eventos. Nenhuma amostra atravessa esta API: primitivos
