@@ -1,16 +1,44 @@
-   Compiling vynamp_engine v0.1.0 (D:\Projects\vynamp\libs\engine\.worktrees\e01-05)
-error[E0432]: unresolved import `vynamp_engine::pipeline`
- --> tests\pipeline.rs:4:20
-  |
-4 | use vynamp_engine::pipeline::{Pipeline, PipelineConfig, TestBackend};
-  |                    ^^^^^^^^ could not find `pipeline` in `vynamp_engine`
+TASK-E01-05 — prova do vermelho (substitui a versao anterior, que citava TestBackend
+inexistente e um erro de compilacao, que nao e vermelho de teste).
 
-error[E0433]: cannot find type `PipelineState` in this scope
-   --> tests\pipeline.rs:112:34
-    |
-112 |     assert_eq!(pipeline.state(), PipelineState::Idle);
-    |                                  ^^^^^^^^^^^^^ use of undeclared type `PipelineState`
+Parte 1 — vermelho do esqueleto (API compila, comportamento vazio)
+  comando: cargo test --test pipeline
+  resultado: 8 failed; 0 passed. Falhas por comportamento, nao por compilacao:
+    eof_drains_to_last_frame                       tests/pipeline.rs:89  left 20 / right 5 (nunca chega a CONTENT)
+    stop_then_play_has_no_stale_audio              tests/pipeline.rs:117 captura != fonte A
+    consumer_drops_ring_content_of_a_past_generation tests/pipeline.rs:182 buffered 0 / 1000
+    ab_switch_has_no_drift_and_no_gain             tests/pipeline.rs:254
+    underrun_zero_fills_the_rest_and_counts        tests/pipeline.rs:285 left 0 / right 600
+    presented_clock_subtracts_latency              tests/pipeline.rs:313 [0,0,0,0,0] / [0,0,1024,2048,3072]
+    push_enforces_capacity_and_frame_alignment     tests/pipeline.rs:323 free_frames 0 / 1024
+    invalid_config_is_an_error                     tests/pipeline.rs:365
+  (tests/pipeline_rt.rs: o contador de alocacao e a guarda RT ficaram verdes no
+  esqueleto, que nao aloca; a prova deles esta na parte 2, linha M11.)
 
-Some errors have detailed explanations: E0432, E0433.
-For more information about an error, try `rustc --explain E0432`.
-error: could not compile `vynamp_engine` (test "pipeline") due to 2 previous errors
+Parte 2 — matriz de mutacao contra o HEAD final (uma mutacao por garantia)
+  comando por linha: cargo test --tests, com a mutacao aplicada em src/pipeline.rs,
+  arquivo restaurado depois; todas compilam e falham so por assert.
+  M1  callback nao descarta a geracao velha     falha: consumer_drops_ring_content_of_a_past_generation ("so B sai"), stop_then_play_has_no_stale_audio ("saida e B exata")
+  M2  push ignora o gate (geracao velha entra)  falha: stop_then_play_has_no_stale_audio
+  M3  cauda parcial nao drenada                 falha: eof_drains_to_last_frame, ab_switch_has_no_drift_and_no_gain, underrun_zero_fills_the_rest_and_counts, consumer_drops_ring_content_of_a_past_generation
+  M4  latency_frames ignorada                   falha: eof_drains_to_last_frame ("latencia >= periodo: nada apresentado ainda"), presented_clock_subtracts_latency
+  M5  ganho 1.0001 no callback                  falha: 6 de 8 (todo oraculo bit a bit)
+  M6  underrun nao incrementado                 falha: underrun_zero_fills_the_rest_and_counts
+  M7  capacidade ignorada (push parcial)        falha: push_enforces_capacity_and_frame_alignment
+  M8  pausa ignorada pelo callback              falha: stop_then_play_has_no_stale_audio
+  M9  relogio nao zera na geracao nova          falha: ab_switch_has_no_drift_and_no_gain ("sem deriva")
+  M10 EOF tratado como underrun                 falha: eof_drains_to_last_frame ("EOF nao e underrun"), ab_switch..., stop_then_play..., consumer_drops...
+  M11 `vec![0u8; 8]` dentro de RT-BEGIN         falha: callback_allocates_nothing ("o callback alocou", left 1 / right 0) e
+                                                rt_region_has_no_forbidden_tokens ("token proibido na regiao RT: vec!")
+
+Ocorrencia registrada: o commit 223d80f (autor "Claude Opus 5.5", nao e esta
+sessao) gravou a mutacao M5 no HEAD por engano; com ela 6 testes falhavam. O
+commit 306d911 a remove e os 24 testes voltam a passar.
+
+Estado final: cargo fmt --all --check ok; cargo clippy --all-targets -D warnings ok;
+cargo test: 14 (lib) + 8 (pipeline) + 2 (pipeline_rt) passam, 0 ignorados.
+Hash por blob (git rev-parse HEAD:<arquivo>, nao o arquivo em disco: autocrlf):
+  src/pipeline.rs       a0b0eb67da0ef8d8f3bd638aac2e35dcbef88b94
+  tests/pipeline.rs     2f371909f25e8f094ba2d45b2d5a29f2bf18f505
+  tests/pipeline_rt.rs  cd41e2dec3588077c612be37e2017ed37ad0e421
+  src/playback.rs       f933b3123d95bf3101839e771f88674d3d59cbc2
