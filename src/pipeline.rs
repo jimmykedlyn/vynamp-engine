@@ -325,7 +325,7 @@ impl Consumer {
                 let base = ((read + frame as u64) % capacity) as usize * channels;
                 for channel in 0..channels {
                     out[frame * channels + channel] =
-                        f32::from_bits(shared.data[base + channel].load(Ordering::Relaxed)) * 1.0001;
+                        f32::from_bits(shared.data[base + channel].load(Ordering::Relaxed));
                 }
             }
             shared.read.store(read + copied as u64, Ordering::Release);
