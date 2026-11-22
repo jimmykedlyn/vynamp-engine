@@ -133,7 +133,7 @@ impl std::error::Error for Error {}
 /// Buffer marcado com geração diferente da atual é descartado sem ser
 /// apresentado.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub struct Generation(pub u64);
+pub struct Generation(u64);
 
 impl Generation {
     /// Valor numérico da geração, para transporte e diagnóstico.
@@ -581,6 +581,15 @@ impl PresentationGate {
     /// lock nem alocação: pode ser chamado da callback de tempo real.
     pub fn admits(&self, generation: Generation) -> bool {
         generation.value() == self.current.load(Ordering::Acquire)
+    }
+
+    /// Geração vigente. Load `Acquire`, sem lock nem alocação.
+    ///
+    /// Serve a quem apresenta e precisa saber **qual** é a geração (para
+    /// zerar a base do relógio quando ela troca); `Generation` continua opaca,
+    /// só o `Engine` a incrementa.
+    pub fn current(&self) -> Generation {
+        Generation(self.current.load(Ordering::Acquire))
     }
 }
 

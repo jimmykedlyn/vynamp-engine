@@ -1,263 +1,396 @@
-//! Integration tests for the audio pipeline: ring SPSC, EOF drain, presented
-//! clock and stream transitions (TASK-E01-05).
+//! Testes de integração do pipeline: ring SPSC, dreno de EOF, relógio
+//! apresentado e transições entre gerações (TASK-E01-05).
+//!
+//! A geração vem do `Engine` real (`presentation_gate`), nunca fabricada.
+//! Todos os oráculos comparam bits (`to_bits`), sem tolerância.
 
-use vynamp_engine::pipeline::{Pipeline, PipelineConfig, PipelineState};
+use vynamp_engine::pipeline::{
+    Consumer, Pipeline, PipelineConfig, PipelineControl, Producer, PushOutcome,
+};
+use vynamp_engine::playback::{Command, Engine, Error, Generation, SourceRef};
 
-/// ENGINE-AC-06 / TASK-E01-05-AC-1: EOF drains to the last frame.
+/// Abre uma fonte no engine e devolve a geração vigente.
+fn open_source(engine: &Engine) -> Generation {
+    engine
+        .send(Command::Open {
+            source: SourceRef::new(1),
+            autoplay: true,
+        })
+        .expect("open");
+    engine.notify_source_ready();
+    engine.notify_ring_ready();
+    engine.snapshot().generation
+}
+
+fn build(engine: &Engine, config: PipelineConfig) -> (Producer, Consumer, PipelineControl) {
+    let pipeline = Pipeline::new(config, engine.presentation_gate()).expect("config valida");
+    let control = pipeline.control();
+    let (producer, consumer) = pipeline.split();
+    (producer, consumer, control)
+}
+
+fn cfg(period: u32, latency: u32, channels: u16, capacity: u32) -> PipelineConfig {
+    PipelineConfig {
+        period_frames: period,
+        latency_frames: latency,
+        channels,
+        ring_capacity_frames: capacity,
+    }
+}
+
+/// Roda um callback sobre um buffer sujo e acrescenta o período à captura.
+fn run(consumer: &mut Consumer, period_samples: usize, capture: &mut Vec<f32>) -> usize {
+    let mut out = vec![f32::NAN; period_samples];
+    let real = consumer.callback(&mut out);
+    capture.extend_from_slice(&out);
+    real
+}
+
+fn bits(samples: &[f32]) -> Vec<u32> {
+    samples.iter().map(|s| s.to_bits()).collect()
+}
+
+/// ENGINE-AC-06 / TASK-E01-05-AC-1: o EOF drena até o último frame.
 ///
-/// Given: a track whose frame count is not a multiple of the backend period.
-/// When: playback reaches EOF and the engine drains.
-/// Then: presented == content_frames; the last captured frame is the source's
-///       last frame; no frame was cut or repeated.
-///
-/// The oracle is independent: content is a known ramp where frame `k` has value
-/// `k`, so the last captured value must be `content_frames - 1` and the captured
-/// values must be exactly `0..content_frames` (no gaps, no repeats).
+/// Oráculo: a fonte é a rampa `k + 1`; a saída concatenada é a fonte bit a bit
+/// e depois só zeros, sem corte nem repetição.
 #[test]
 fn eof_drains_to_last_frame() {
-    const PERIOD_FRAMES: u32 = 1024;
-    const LATENCY_FRAMES: u32 = 1024;
-    const CONTENT_FRAMES: u64 = 3 * PERIOD_FRAMES as u64 + 512;
-    assert_eq!(CONTENT_FRAMES % PERIOD_FRAMES as u64, 512, "arrangement");
+    const PERIOD: u32 = 1024;
+    const LATENCY: u32 = 1024;
+    const CONTENT: usize = 3 * PERIOD as usize + 512;
+    let engine = Engine::new();
+    let generation = open_source(&engine);
+    let (mut producer, mut consumer, control) = build(&engine, cfg(PERIOD, LATENCY, 1, 8192));
 
-    let config = PipelineConfig {
-        period_frames: PERIOD_FRAMES,
-        latency_frames: LATENCY_FRAMES,
-        channels: 1,
-        ring_capacity_frames: 8192,
-    };
-    let mut pipeline = Pipeline::new(config);
+    let source: Vec<f32> = (0..CONTENT).map(|k| (k + 1) as f32).collect();
+    assert_eq!(
+        producer.push(generation, &source),
+        Ok(PushOutcome::Accepted)
+    );
+    assert_eq!(producer.push_eof(generation), PushOutcome::Accepted);
 
-    // Source: a ramp 0.0, step, 2*step, ... where frame k has value k * step.
-    let step = 1.0_f32 / CONTENT_FRAMES as f32;
-    let source: Vec<f32> = (0..CONTENT_FRAMES).map(|k| k as f32 * step).collect();
-
-    // Producer: fill the ring in chunks up to content_frames, then write EOF.
-    let generation = pipeline.generation();
-    pipeline.start_generation(generation);
-    let mut written = 0usize;
-    while written < source.len() {
-        let end = (written + PERIOD_FRAMES as usize).min(source.len());
-        pipeline.push_samples(&source[written..end]).expect("push");
-        written = end;
-    }
-    pipeline.push_eof();
-
-    // Consumer: run the callback until it has presented every content frame.
-    // The backend period is PERIOD_FRAMES; each callback consumes one period.
-    let mut presented = 0u64;
-    let mut captured: Vec<f32> = Vec::new();
-    // Bound the drain loop: worst case is content frames + latency frames.
-    let max_callbacks = (CONTENT_FRAMES + LATENCY_FRAMES as u64) / PERIOD_FRAMES as u64 + 2;
-    for _ in 0..max_callbacks {
-        pipeline.callback().expect("callback");
-        presented = pipeline.presented_frames();
-        captured.extend_from_slice(pipeline.last_period());
-        if presented >= CONTENT_FRAMES {
-            break;
+    let mut capture = Vec::new();
+    let mut previous = 0u64;
+    let mut callbacks = 0;
+    while control.presented_frames() < CONTENT as u64 && callbacks < 20 {
+        run(&mut consumer, PERIOD as usize, &mut capture);
+        callbacks += 1;
+        let presented = control.presented_frames();
+        assert!(presented >= previous, "presented e monotonico");
+        assert!(
+            presented <= control.content_read_frames(),
+            "presented nunca passa do que saiu do ring"
+        );
+        if callbacks == 1 {
+            assert_eq!(presented, 0, "latencia >= periodo: nada apresentado ainda");
         }
+        previous = presented;
     }
 
-    assert_eq!(
-        presented, CONTENT_FRAMES,
-        "presented reaches content_frames"
+    // 3584 + 1024 de latencia = 4608 frames de saida = 5 periodos.
+    assert_eq!(callbacks, 5);
+    assert_eq!(control.presented_frames(), CONTENT as u64);
+    assert_eq!(control.content_read_frames(), CONTENT as u64);
+    assert_eq!(capture.len(), 5 * PERIOD as usize);
+    assert_eq!(bits(&capture[..CONTENT]), bits(&source), "fonte exata");
+    assert!(
+        capture[CONTENT..].iter().all(|s| s.to_bits() == 0),
+        "depois do EOF so silencio exato"
     );
-    assert_eq!(
-        pipeline.presented_frames(),
-        CONTENT_FRAMES,
-        "presented stable"
-    );
-
-    // The oracle checks the captured samples: exactly content_frames values, no
-    // cut or repeat. The capture collects all periods written by callbacks; the
-    // last callback may write trailing zeros (silence after EOF), which the
-    // backend signals via `last_period_frames()`. Only real frames are counted.
-    let real = pipeline.captured_real_frames();
-    assert_eq!(real, CONTENT_FRAMES, "captured real frames == content");
-    assert_eq!(
-        captured.last().copied(),
-        Some(*source.last().unwrap_or(&0.0)),
-        "last captured == last source frame"
-    );
+    assert_eq!(control.underruns(), 0, "EOF nao e underrun");
 }
 
-/// ENGINE-AC-07 / TASK-E01-05-AC-2: stop then play has no stale audio.
+/// ENGINE-AC-07 / TASK-E01-05-AC-2: Stop, Open e Play sem áudio velho.
 ///
-/// Given: paused with samples still in the ring and decode in flight.
-/// When: Stop → Open of another track → Play.
-/// Then: no sample from the previous track is captured.
-///
-/// Oracle: samples are tagged per source. Track A writes values in `[1.0, 2.0)`;
-/// track B writes values in `[-2.0, -1.0)`. Any captured sample ≥ 0.0 is stale.
+/// A usa valores em `[1, 2)`; B em `[-2, -1)`. O oráculo é a saída de B exata
+/// seguida de zeros; qualquer bit de A reprova.
 #[test]
 fn stop_then_play_has_no_stale_audio() {
-    const PERIOD_FRAMES: u32 = 512;
-    const CHANNELS: u16 = 1;
-    let config = PipelineConfig {
-        period_frames: PERIOD_FRAMES,
-        latency_frames: PERIOD_FRAMES,
-        channels: CHANNELS,
-        ring_capacity_frames: 8192,
-    };
-    let mut pipeline = Pipeline::new(config);
+    const PERIOD: u32 = 512;
+    let engine = Engine::new();
+    let gen_a = open_source(&engine);
+    let (mut producer, mut consumer, control) = build(&engine, cfg(PERIOD, PERIOD, 1, 8192));
 
-    // Track A opens and plays; fill the ring with A samples.
-    let gen_a = pipeline.generation();
-    pipeline.start_generation(gen_a);
     let track_a: Vec<f32> = (0..4096).map(|k| 1.0 + k as f32 / 8192.0).collect();
-    pipeline.push_samples(&track_a).expect("push A");
-    // The callback has not run yet: samples are still in the ring.
+    assert_eq!(producer.push(gen_a, &track_a), Ok(PushOutcome::Accepted));
+    let mut capture = Vec::new();
+    run(&mut consumer, PERIOD as usize, &mut capture);
+    run(&mut consumer, PERIOD as usize, &mut capture);
     assert_eq!(
-        pipeline.presented_frames(),
-        0,
-        "arrangement: no callback yet"
+        bits(&capture),
+        bits(&track_a[..1024]),
+        "A toca antes da pausa"
     );
+    assert_eq!(control.buffered_frames(), 4096 - 1024);
 
-    // Pause (logical: no callback runs; samples stay in the ring).
-    // A decode buffer is "in flight": producer still holds geration A.
-    pipeline.push_samples(&track_a[..512]).expect("in-flight A");
-
-    // Stop: transitions to a new generation; the ring must be drained so no A
-    // sample is presented.
-    pipeline.stop();
-    assert_eq!(pipeline.state(), PipelineState::Idle);
-
-    // Open track B and Play.
-    pipeline.open();
-    let gen_b = pipeline.generation();
-    assert!(gen_b > gen_a, "open increments the generation");
-    pipeline.start_generation(gen_b);
-    let track_b: Vec<f32> = (0..2048).map(|k| -2.0 + k as f32 / 4096.0).collect();
-    pipeline.push_samples(&track_b).expect("push B");
-    pipeline.push_eof();
-
-    // Now run the callback and capture. Only real (non-silence) frames count;
-    // silence padding after EOF is not audio and must not appear in the capture.
-    for _ in 0..64 {
-        pipeline.callback().expect("callback");
+    // Pausa: sobra A no ring e o callback nao consome nem apresenta.
+    engine.send(Command::Pause).expect("pause");
+    control.set_paused(true);
+    assert!(control.is_paused());
+    let presented_before = control.presented_frames();
+    let mut paused = Vec::new();
+    for _ in 0..3 {
+        assert_eq!(run(&mut consumer, PERIOD as usize, &mut paused), 0);
     }
-    let real = pipeline.captured_real_frames();
+    assert!(paused.iter().all(|s| s.to_bits() == 0), "pausa e silencio");
+    assert_eq!(control.buffered_frames(), 3072, "pausa nao consome o ring");
+    assert_eq!(control.presented_frames(), presented_before);
+    assert_eq!(control.underruns(), 0, "pausa nao e underrun");
+
+    // Decode em voo: ainda admitido enquanto a geracao A vigora.
+    assert_eq!(
+        producer.push(gen_a, &track_a[..512]),
+        Ok(PushOutcome::Accepted)
+    );
+    assert_eq!(control.buffered_frames(), 3072 + 512);
+
+    // Stop encerra A; buffer velho tardio e recusado e nao entra no ring.
+    engine.send(Command::Stop).expect("stop");
+    assert_eq!(
+        producer.push(gen_a, &track_a[..512]),
+        Ok(PushOutcome::Stale)
+    );
+    assert_eq!(producer.push_eof(gen_a), PushOutcome::Stale);
+
+    // Open de B e Play.
+    let gen_b = open_source(&engine);
+    assert!(gen_b > gen_a);
+    engine.send(Command::Pause).expect("pause B");
+    engine.send(Command::Play).expect("play B");
+    control.set_paused(false);
+    let track_b: Vec<f32> = (0..2048).map(|k| -2.0 + k as f32 / 4096.0).collect();
+    assert_eq!(producer.push(gen_b, &track_b), Ok(PushOutcome::Accepted));
+    assert_eq!(producer.push_eof(gen_b), PushOutcome::Accepted);
+
+    // O primeiro callback de B descarta o que sobrou de A no ring.
+    let mut out = Vec::new();
+    for _ in 0..6 {
+        run(&mut consumer, PERIOD as usize, &mut out);
+    }
+    assert_eq!(bits(&out[..2048]), bits(&track_b), "saida e B exata");
     assert!(
-        pipeline.captured_samples().iter().all(|&s| s <= 0.0),
-        "no positive (track A) sample is captured"
+        out[2048..].iter().all(|s| s.to_bits() == 0),
+        "depois de B so silencio"
     );
     assert!(
-        real <= track_b.len() as u64,
-        "capture is bounded by track B real frames"
+        out.iter().all(|s| *s <= 0.0),
+        "nenhuma amostra positiva (A) sai"
     );
+    assert_eq!(control.underruns(), 0);
 }
 
-/// ENGINE-AC-08 / TASK-E01-05-AC-3: A/B switch has no drift and no gain.
+/// Decode em voo: o buffer da geração velha que já entrou no ring antes do
+/// Stop (corrida admitida por `admits`) é descartado pelo consumidor.
 ///
-/// Given: two copies of the same file, default volume 1.0.
-/// When: A/B alternates over 60 s of simulated playback at the backend rate.
-/// Then: position and presented frames do not drift; no sample exceeds the
-///       source; switching ends the previous source.
+/// O produtor grava com a geração A quando o gate ainda a admite; o Stop e o
+/// Open de B vêm depois; o ring ainda guarda A quando B toca.
+#[test]
+fn consumer_drops_ring_content_of_a_past_generation() {
+    let engine = Engine::new();
+    let gen_a = open_source(&engine);
+    let (mut producer, mut consumer, control) = build(&engine, cfg(256, 0, 1, 4096));
+    let track_a: Vec<f32> = (0..1000).map(|k| 5.0 + k as f32).collect();
+    assert_eq!(producer.push(gen_a, &track_a), Ok(PushOutcome::Accepted));
+    assert_eq!(control.buffered_frames(), 1000);
+
+    engine.send(Command::Stop).expect("stop");
+    let gen_b = open_source(&engine);
+    let track_b: Vec<f32> = (0..300).map(|k| -1.0 - k as f32).collect();
+    assert_eq!(producer.push(gen_b, &track_b), Ok(PushOutcome::Accepted));
+    assert_eq!(producer.push_eof(gen_b), PushOutcome::Accepted);
+
+    let mut out = Vec::new();
+    run(&mut consumer, 256, &mut out);
+    run(&mut consumer, 256, &mut out);
+    assert_eq!(bits(&out[..300]), bits(&track_b), "so B sai");
+    assert!(out[300..].iter().all(|s| s.to_bits() == 0));
+    assert_eq!(control.content_read_frames(), 300);
+    assert_eq!(control.underruns(), 0);
+}
+
+/// ENGINE-AC-08 / TASK-E01-05-AC-3: A/B sem deriva e sem ganho.
 ///
-/// Oracle: both "copies" are the same ramp `k/num_frames`. The concatenated
-/// captured stream must be `0.0, 1/n, 2/n, ...` with no gap or repeat, and every
-/// sample == its source value (no gain). The alternate source is chosen by the
-/// harness on each boundary; the engine only switches generations.
+/// Dois "arquivos" idênticos alternam a cada segundo (48 000 frames, que não é
+/// múltiplo do período de 1 024: toda troca exercita a cauda parcial). Cada
+/// troca é Stop + Open no engine real, ou seja, uma geração nova.
 #[test]
 fn ab_switch_has_no_drift_and_no_gain() {
-    const PERIOD_FRAMES: u32 = 1024;
-    const LATENCY_FRAMES: u32 = 1024;
-    const RATE: u32 = 48000;
-    const SECONDS: u32 = 60;
-    const CONTENT_FRAMES: u64 = RATE as u64 * SECONDS as u64;
-    const SWITCHES: u64 = 60; // one per second
-    const SWITCH_EVERY: u64 = CONTENT_FRAMES / SWITCHES;
+    const PERIOD: u32 = 1024;
+    const LATENCY: u32 = 1024;
+    const SEGMENT: usize = 48_000;
+    const SEGMENTS: usize = 60;
+    let total = SEGMENT * SEGMENTS;
 
-    let config = PipelineConfig {
-        period_frames: PERIOD_FRAMES,
-        latency_frames: LATENCY_FRAMES,
-        channels: 1,
-        ring_capacity_frames: 8192,
-    };
-    let mut pipeline = Pipeline::new(config);
+    let engine = Engine::new();
+    let (mut producer, mut consumer, control) = build(&engine, cfg(PERIOD, LATENCY, 1, 8192));
+    // O arquivo: frame k vale k + 1 (inteiro exato em f32 até 2^24).
+    let file: Vec<f32> = (0..total).map(|k| (k + 1) as f32).collect();
+    let max_source = file.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
 
-    // A "file" is the same ramp. Two copies are identical by construction.
-    let step = 1.0_f32 / CONTENT_FRAMES as f32;
-    let file: Vec<f32> = (0..CONTENT_FRAMES as usize)
-        .map(|k| k as f32 * step)
-        .collect();
+    let mut presented_sum = 0u64;
+    let mut max_out = 0.0_f32;
+    let mut previous_generation: Option<Generation> = None;
+    for segment in 0..SEGMENTS {
+        if previous_generation.is_some() {
+            engine.send(Command::Stop).expect("stop");
+        }
+        let generation = open_source(&engine);
+        if let Some(previous) = previous_generation {
+            assert!(generation > previous, "cada troca e uma geracao nova");
+        }
+        previous_generation = Some(generation);
 
-    // Track how much of the file we've pushed for the current source.
-    let mut pushed_for_current_source: u64 = 0;
-    let mut next_switch = SWITCH_EVERY;
-    let mut presented_prev = 0u64;
-    let mut last_capture_index: u64 = 0;
-
-    // Start source A with a generation.
-    let generation = pipeline.generation();
-    pipeline.start_generation(generation);
-
-    let max_callbacks = (CONTENT_FRAMES + LATENCY_FRAMES as u64) / PERIOD_FRAMES as u64 + 4;
-    for _ in 0..max_callbacks {
-        // Refill the ring before each callback to keep the pipeline fed.
-        // Push as much as fits (up to remaining content for this source).
-        let remaining = CONTENT_FRAMES.saturating_sub(pushed_for_current_source);
-        if remaining > 0 {
-            // Empurra exatamente um período por iteração: o callback consome um
-            // período, então o ring nunca passa de um período em buffer e não
-            // há RingFull. (Produtor real respeita espaço livre do ring; o
-            // Pipeline não o expõe nesta TASK.)
-            let push_len = remaining.min(PERIOD_FRAMES as u64) as usize;
-            let start = pushed_for_current_source as usize;
-            pipeline
-                .push_samples(&file[start..start + push_len])
-                .expect("push");
-            pushed_for_current_source += push_len as u64;
-            // EOF só depois do último frame da fonte corrente.
-            if pushed_for_current_source >= CONTENT_FRAMES {
-                pipeline.push_eof();
+        let source = &file[segment * SEGMENT..(segment + 1) * SEGMENT];
+        let mut pushed = 0usize;
+        let mut capture = Vec::new();
+        let mut callbacks = 0;
+        let mut last_presented = 0u64;
+        while callbacks == 0 || control.presented_frames() < SEGMENT as u64 {
+            // Produtor enche o que couber; EOF junto do ultimo frame.
+            let room = (producer.free_frames() as usize).min(SEGMENT - pushed);
+            if room > 0 {
+                let outcome = producer.push(generation, &source[pushed..pushed + room]);
+                assert_eq!(outcome, Ok(PushOutcome::Accepted));
+                pushed += room;
+                if pushed == SEGMENT {
+                    assert_eq!(producer.push_eof(generation), PushOutcome::Accepted);
+                }
             }
-        }
-
-        pipeline.callback().expect("callback");
-        let presented = pipeline.presented_frames();
-        assert!(presented >= presented_prev, "presented must be monotonic");
-        presented_prev = presented;
-
-        // Capture happens in the harness; the oracle compares each sample with
-        // its expected ramp value.
-        let real = pipeline.captured_real_frames() as usize;
-        let batch = pipeline.captured_samples();
-        let end = batch.len().min(batch.len().max(real));
-        let batch_real = &batch[..end];
-        for (i, &sample) in batch_real.iter().enumerate() {
-            let index = last_capture_index + i as u64;
-            if index >= CONTENT_FRAMES {
-                break;
+            run(&mut consumer, PERIOD as usize, &mut capture);
+            callbacks += 1;
+            let presented = control.presented_frames();
+            if callbacks > 1 {
+                assert!(presented >= last_presented, "monotonico na geracao");
             }
-            let expected = index as f32 * step;
-            assert!(
-                (sample - expected).abs() < 1e-6,
-                "sample {index} = {sample}, expected {expected} (drift/gain)"
-            );
+            last_presented = presented;
+            assert!(callbacks < 100, "segmento nao termina");
         }
-        last_capture_index += batch_real.len() as u64;
-
-        // Switch source at the boundary, but only if content remains.
-        if presented >= next_switch && presented < CONTENT_FRAMES {
-            // Switch: old source ends, new source (identical copy) starts.
-            // The engine ends the old generation and starts a new one.
-            pipeline.switch_source();
-            next_switch = (next_switch + SWITCH_EVERY).min(CONTENT_FRAMES);
-            // Reset pushed counter for the new source.
-            pushed_for_current_source = presented;
-        }
-
-        if presented >= CONTENT_FRAMES {
-            break;
-        }
+        assert_eq!(control.presented_frames(), SEGMENT as u64, "sem deriva");
+        assert_eq!(
+            bits(&capture[..SEGMENT]),
+            bits(source),
+            "amostra == fonte na posicao absoluta (sem ganho)"
+        );
+        assert!(capture[SEGMENT..].iter().all(|s| s.to_bits() == 0));
+        max_out = capture.iter().fold(max_out, |m, s| m.max(s.abs()));
+        presented_sum += control.presented_frames();
     }
-
-    // Oracle: presented frames == content frames (no drift), and the captured
-    // stream covered the whole ramp exactly once (no gap or repeat).
-    assert_eq!(pipeline.presented_frames(), CONTENT_FRAMES, "no drift");
     assert_eq!(
-        last_capture_index, CONTENT_FRAMES,
-        "every frame captured once"
+        presented_sum, total as u64,
+        "soma dos presented == conteudo"
     );
+    assert!(max_out <= max_source, "nenhuma amostra excede a fonte");
+    assert_eq!(control.underruns(), 0);
+}
+
+/// PIPE-REQ-04: underrun gera zeros, incrementa o contador e não bloqueia.
+///
+/// Estéreo: 600 frames disponíveis para um período de 1 024. A saída é o que
+/// havia, intercalado e exato, depois zeros até o fim do buffer.
+#[test]
+fn underrun_zero_fills_the_rest_and_counts() {
+    let engine = Engine::new();
+    let generation = open_source(&engine);
+    let (mut producer, mut consumer, control) = build(&engine, cfg(1024, 0, 2, 4096));
+    let source: Vec<f32> = (0..1200).map(|k| (k + 1) as f32).collect(); // 600 frames
+    assert_eq!(
+        producer.push(generation, &source),
+        Ok(PushOutcome::Accepted)
+    );
+
+    let mut out = vec![f32::NAN; 2048];
+    let real = consumer.callback(&mut out);
+    assert_eq!(real, 600);
+    assert_eq!(bits(&out[..1200]), bits(&source));
+    assert!(out[1200..].iter().all(|s| s.to_bits() == 0), "resto zerado");
+    assert_eq!(control.underruns(), 1);
+    assert_eq!(
+        control.presented_frames(),
+        600,
+        "latencia 0: apresentado = lido"
+    );
+
+    // Ring vazio, sem EOF: outro underrun, saida toda zero (buffer sujo antes).
+    let mut out = vec![f32::NAN; 2048];
+    assert_eq!(consumer.callback(&mut out), 0);
+    assert!(out.iter().all(|s| s.to_bits() == 0));
+    assert_eq!(control.underruns(), 2);
+    assert_eq!(control.presented_frames(), 600, "silencio nao e conteudo");
+}
+
+/// PIPE-REQ-06: `presented = lido − latency_frames`, monotônico.
+#[test]
+fn presented_clock_subtracts_latency() {
+    let engine = Engine::new();
+    let generation = open_source(&engine);
+    let (mut producer, mut consumer, control) = build(&engine, cfg(1024, 2048, 1, 16384));
+    let source: Vec<f32> = (0..8192).map(|k| (k + 1) as f32).collect();
+    assert_eq!(
+        producer.push(generation, &source),
+        Ok(PushOutcome::Accepted)
+    );
+    let mut sink = Vec::new();
+    let mut seen = Vec::new();
+    for _ in 0..5 {
+        run(&mut consumer, 1024, &mut sink);
+        seen.push(control.presented_frames());
+    }
+    assert_eq!(seen, vec![0, 0, 1024, 2048, 3072]);
+}
+
+/// Capacidade é aplicada: push que não cabe é recusado inteiro; resto não
+/// múltiplo de canais é erro; nada é descartado em silêncio.
+#[test]
+fn push_enforces_capacity_and_frame_alignment() {
+    let engine = Engine::new();
+    let generation = open_source(&engine);
+    let (mut producer, mut consumer, control) = build(&engine, cfg(256, 0, 2, 1024));
+    assert_eq!(producer.free_frames(), 1024);
+
+    let odd = vec![0.5_f32; 3];
+    assert_eq!(
+        producer.push(generation, &odd),
+        Err(Error::InvalidArgument("samples nao multiplo de channels"))
+    );
+    assert_eq!(control.buffered_frames(), 0);
+
+    let too_big = vec![0.5_f32; 2 * 1025];
+    assert_eq!(
+        producer.push(generation, &too_big),
+        Err(Error::InvalidArgument("ring sem espaco para o push"))
+    );
+    assert_eq!(control.buffered_frames(), 0, "sem escrita parcial");
+
+    let exact: Vec<f32> = (0..2048).map(|k| k as f32).collect();
+    assert_eq!(producer.push(generation, &exact), Ok(PushOutcome::Accepted));
+    assert_eq!(producer.free_frames(), 0);
+    assert_eq!(
+        producer.push(generation, &[1.0, 1.0]),
+        Err(Error::InvalidArgument("ring sem espaco para o push"))
+    );
+
+    // Consumir libera espaco; a volta do ring preserva a ordem exata.
+    let mut capture = Vec::new();
+    run(&mut consumer, 512, &mut capture);
+    assert_eq!(producer.free_frames(), 256);
+    let wrap: Vec<f32> = (0..512).map(|k| 10_000.0 + k as f32).collect();
+    assert_eq!(producer.push(generation, &wrap), Ok(PushOutcome::Accepted));
+    for _ in 0..4 {
+        run(&mut consumer, 512, &mut capture);
+    }
+    let expected: Vec<f32> = exact.iter().chain(wrap.iter()).copied().collect();
+    assert_eq!(bits(&capture[..expected.len()]), bits(&expected));
+}
+
+/// Configuração inválida é erro, não pânico.
+#[test]
+fn invalid_config_is_an_error() {
+    let engine = Engine::new();
+    for config in [cfg(0, 0, 1, 64), cfg(64, 0, 0, 64), cfg(64, 0, 1, 32)] {
+        assert!(matches!(
+            Pipeline::new(config, engine.presentation_gate()),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
 }

@@ -1,375 +1,390 @@
-//! Pipeline de áudio: ring SPSC, mixer PCM, relógio de frames apresentados
-//! e transições entre fontes (TASK-E01-05).
+//! Pipeline de áudio (TASK-E01-05): ring SPSC entre decode e callback, dreno de
+//! EOF, relógio de frames apresentados e descarte por geração.
 //!
-//! O caminho do sample é: produtor (`push_samples`) enche o ring interno,
-//! consumidor (`callback`) retira um período por chamada. Ao chegar a marca de
-//! EOF, o callback drena o resto do ring sem descartar frames e depois preenche
-//! com zeros. O `presented_frames` conta o que efetivamente saiu do dispositivo;
-//! o mixer soma em `f32` no nível recebido e o ganho master é `1.0` (não
-//! amplifica).
+//! # Desenho
+//!
+//! [`Pipeline::new`] aloca **uma vez** o ring (`Box<[AtomicU32]>` com os bits de
+//! cada `f32`; sem `unsafe`, `#![forbid(unsafe_code)]` vale) e os contadores
+//! atômicos, depois o divide em [`Producer`] (worker de decode/DSP) e
+//! [`Consumer`] (callback do output). [`PipelineControl`] é o handle clonável de
+//! pausa e leitura de contadores.
+//!
+//! Contadores `u64` monotônicos publicados com `Release` e lidos com `Acquire`
+//! (`specs/pipeline.md` §3.2); o índice no ring é `posição % capacidade`.
+//!
+//! # Geração
+//!
+//! A geração pertence ao `Engine`: o pipeline não a cria nem a incrementa. O
+//! consumidor lê a vigente pelo [`PresentationGate`]; o produtor etiqueta cada
+//! push com a geração do buffer. Na primeira gravação de uma geração nova o
+//! produtor publica `gen_start` (posição do ring onde ela começa) e depois a
+//! etiqueta. O consumidor só lê quando a etiqueta é a geração vigente e, ao
+//! armar, pula tudo antes de `gen_start`: o que sobrou da geração velha nunca
+//! sai (`specs/pipeline.md` §6). Um produtor atrasado que grava com etiqueta
+//! velha depois do Stop não é lido, porque a etiqueta não bate com a vigente.
+//!
+//! # Limites conhecidos
+//!
+//! - Uma geração velha que ainda ocupa o ring libera o espaço só quando o
+//!   consumidor arma a geração nova; até lá `push` pode devolver erro de falta
+//!   de espaço. O produtor tenta de novo depois do próximo callback.
+//! - Mixer e ramp de play/stop (citados na "Entrega" da TASK) não existem aqui:
+//!   nenhum critério de aceite os cobre e um mixer sem teste seria stub.
+//! - A corrida com threads reais (produtor passa em `admits`, a geração muda e
+//!   ele grava depois) é coberta pela etiqueta, mas os testes são de uma thread
+//!   só; a prova com threads fica para E01-10.
 
-pub use crate::playback::Generation;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-/// Estado lógico do pipeline nesta TASK.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PipelineState {
-    /// Sem fonte.
-    Idle,
-    /// Tocando.
-    Playing,
-    /// Pausado.
-    Paused,
-}
+use crate::playback::{Error, Generation, PresentationGate};
+
+/// Sem marca de EOF gravada.
+const NO_EOF: u64 = u64::MAX;
+/// Sem etiqueta de geração gravada.
+const NO_TAG: u64 = u64::MAX;
 
 /// Configuração do pipeline.
 #[derive(Clone, Copy, Debug)]
 pub struct PipelineConfig {
-    /// Período do backend em frames.
+    /// Período do backend em frames; deve ser maior que zero.
     pub period_frames: u32,
-    /// Latência reportada do backend em frames.
+    /// Latência reportada do backend em frames, descontada do relógio.
     pub latency_frames: u32,
-    /// Canais do output (intercalados).
+    /// Canais do output (intercalados); deve ser maior que zero.
     pub channels: u16,
-    /// Capacidade do ring SPSC em frames.
+    /// Capacidade do ring em frames; no mínimo um período.
     pub ring_capacity_frames: u32,
 }
 
 impl PipelineConfig {
-    fn validate(&self) -> Result<(), PipelineError> {
+    fn validate(&self) -> Result<(), Error> {
         if self.period_frames == 0 {
-            return Err(PipelineError::InvalidConfig("period_frames"));
+            return Err(Error::InvalidArgument("period_frames"));
         }
         if self.channels == 0 {
-            return Err(PipelineError::InvalidConfig("channels"));
+            return Err(Error::InvalidArgument("channels"));
         }
         if self.ring_capacity_frames < self.period_frames {
-            return Err(PipelineError::InvalidConfig("ring_capacity_frames"));
+            return Err(Error::InvalidArgument("ring_capacity_frames"));
         }
         Ok(())
     }
-
-    /// Amostras por frame = canais.
-    fn samples_per_frame(&self) -> usize {
-        self.channels as usize
-    }
 }
 
-/// Erro do pipeline.
+/// Destino de um push aceito pela API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PipelineError {
-    /// Configuração inválida (campo nomeado).
-    InvalidConfig(&'static str),
-    /// Capacidade do ring excedida (produtor deve esperar).
-    RingFull,
+pub enum PushOutcome {
+    /// Amostras gravadas no ring.
+    Accepted,
+    /// A geração do buffer já não é a vigente: descartado sem gravar.
+    Stale,
 }
 
-/// Mixer PCM mínimo: soma streams em `f32` no nível recebido, sem DSP.
-///
-/// Não aplica EQ, ganho, pan ou ReplayGain. O ganho master é `1.0` (não
-/// amplifica) e o mixdown é a soma aritmética dos streams.
-#[derive(Default)]
-pub struct Mixer {
-    accumulated: Vec<f32>,
-    frames: u64,
-}
-
-impl Mixer {
-    /// Novo mixer vazio.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Soma `samples` ao acumulador de `frames` frames.
-    ///
-    /// O acumulador cresce sob demanda; não aloca no caminho de tempo real se
-    /// a capacidade já foi reservada.
-    pub fn add(&mut self, samples: &[f32]) {
-        if self.accumulated.len() < samples.len() {
-            self.accumulated.resize(samples.len(), 0.0);
-        }
-        for (dst, &src) in self.accumulated.iter_mut().zip(samples) {
-            *dst += src;
-        }
-        self.frames = (self.accumulated.len() / samples_per_channel(samples)) as u64;
-    }
-
-    /// Zera o acumulador.
-    pub fn clear(&mut self) {
-        self.accumulated.clear();
-        self.frames = 0;
-    }
-
-    /// Amostras mixadas.
-    pub fn samples(&self) -> &[f32] {
-        &self.accumulated
-    }
-
-    /// Frames mixados.
-    pub fn frames(&self) -> u64 {
-        self.frames
-    }
-}
-
-impl std::fmt::Debug for Mixer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Mixer")
-            .field("frames", &self.frames)
-            .finish()
-    }
-}
-
-fn samples_per_channel(_samples: &[f32]) -> usize {
-    // Canais = 1 nesta TASK; a função existe para o mixer não confundir
-    // amostras com frames.
-    1
-}
-///
-/// `push_samples` (produtor) e `callback` (consumidor) são o ring SPSC
-/// lógico: o teste chama um depois do outro, sem thread real. A marca de EOF
-/// separa "acabou" de "atrasou".
-pub struct Pipeline {
+/// Estado compartilhado entre produtor, consumidor e controle.
+struct Shared {
     config: PipelineConfig,
-    state: PipelineState,
-    generation: Generation,
-    /// Ring linear de amostras intercaladas.
-    ring: Vec<f32>,
-    /// Índice do primeiro frame ainda não consumido.
-    head: usize,
-    /// Frames de conteúdo ainda não presentes no ring.
-    remaining_frames: u64,
-    /// Marca de EOF gravada depois do último frame.
-    eof: bool,
-    /// Frames efetivamente apresentados (u64, monotônico por geração).
-    presented_frames: u64,
-    /// Frames de conteúdo apresentados nesta geração.
-    content_presented: u64,
-    /// Total de frames de conteúdo declarados ao abrir a geração.
-    content_frames: u64,
-    /// Amostras capturadas após o último `drain_capture`.
-    captured: Vec<f32>,
-    /// Amostras capturadas desde o início (para oráculo do teste).
-    all_captured: Vec<f32>,
+    gate: PresentationGate,
+    /// Bits `f32` das amostras intercaladas: `capacity_frames * channels`.
+    data: Box<[AtomicU32]>,
+    /// Frames gravados desde o início (só o produtor escreve).
+    written: AtomicU64,
+    /// Frames lidos ou descartados desde o início (só o consumidor escreve).
+    read: AtomicU64,
+    /// Posição do ring onde começa a geração etiquetada em `tag`.
+    gen_start: AtomicU64,
+    /// Geração do conteúdo que o produtor está gravando.
+    tag: AtomicU64,
+    /// Posição onde a geração etiquetada termina; `NO_EOF` se ainda aberta.
+    eof_pos: AtomicU64,
+    paused: AtomicBool,
+    /// Frames de conteúdo lidos na geração vigente do consumidor.
+    content_read: AtomicU64,
+    presented: AtomicU64,
+    underruns: AtomicU64,
+}
+
+impl Shared {
+    fn capacity(&self) -> u64 {
+        u64::from(self.config.ring_capacity_frames)
+    }
+
+    fn channels(&self) -> usize {
+        usize::from(self.config.channels)
+    }
+
+    fn buffered(&self) -> u64 {
+        let written = self.written.load(Ordering::Acquire);
+        let read = self.read.load(Ordering::Acquire);
+        written.saturating_sub(read)
+    }
+}
+
+/// Fábrica do ring: aloca tudo aqui e entrega as três pontas.
+pub struct Pipeline {
+    shared: Arc<Shared>,
 }
 
 impl Pipeline {
-    /// Novo pipeline em `Idle`.
-    pub fn new(config: PipelineConfig) -> Self {
-        Self {
-            config,
-            state: PipelineState::Idle,
-            generation: Generation::default(),
-            ring: Vec::new(),
-            head: 0,
-            remaining_frames: 0,
-            eof: false,
-            presented_frames: 0,
-            content_presented: 0,
-            content_frames: 0,
-            captured: Vec::new(),
-            all_captured: Vec::new(),
+    /// Aloca o ring e os contadores. `gate` vem de
+    /// [`Engine::presentation_gate`](crate::playback::Engine::presentation_gate).
+    ///
+    /// Configuração inválida devolve `Error::InvalidArgument` com o campo.
+    pub fn new(config: PipelineConfig, gate: PresentationGate) -> Result<Self, Error> {
+        config.validate()?;
+        let samples = config.ring_capacity_frames as usize * usize::from(config.channels);
+        let data: Box<[AtomicU32]> = (0..samples).map(|_| AtomicU32::new(0)).collect();
+        Ok(Self {
+            shared: Arc::new(Shared {
+                config,
+                gate,
+                data,
+                written: AtomicU64::new(0),
+                read: AtomicU64::new(0),
+                gen_start: AtomicU64::new(0),
+                tag: AtomicU64::new(NO_TAG),
+                eof_pos: AtomicU64::new(NO_EOF),
+                paused: AtomicBool::new(false),
+                content_read: AtomicU64::new(0),
+                presented: AtomicU64::new(0),
+                underruns: AtomicU64::new(0),
+            }),
+        })
+    }
+
+    /// Handle de controle e leitura; clonável, serve a qualquer thread.
+    pub fn control(&self) -> PipelineControl {
+        PipelineControl {
+            shared: Arc::clone(&self.shared),
         }
     }
 
-    /// Estado lógico.
-    pub fn state(&self) -> PipelineState {
-        self.state
+    /// Divide em produtor e consumidor (SPSC: um de cada).
+    pub fn split(self) -> (Producer, Consumer) {
+        (
+            Producer {
+                shared: Arc::clone(&self.shared),
+                eof_sent: false,
+            },
+            Consumer {
+                shared: self.shared,
+                generation: NO_TAG,
+                armed: false,
+                output_frames: 0,
+                content_read: 0,
+                presented: 0,
+            },
+        )
+    }
+}
+
+/// Lado produtor: o worker de decode/DSP.
+pub struct Producer {
+    shared: Arc<Shared>,
+    eof_sent: bool,
+}
+
+impl Producer {
+    /// Frames que cabem agora no ring.
+    pub fn free_frames(&self) -> u32 {
+        let shared = &self.shared;
+        let free = shared.capacity().saturating_sub(shared.buffered());
+        // `free <= capacity`, que é `u32`.
+        u32::try_from(free).unwrap_or(u32::MAX)
     }
 
-    /// Geração vigente.
-    pub fn generation(&self) -> Generation {
-        self.generation
-    }
-
-    /// Configuração.
-    pub fn config(&self) -> &PipelineConfig {
-        &self.config
-    }
-
-    /// Inicia a reprodução da geração `generation`.
+    /// Grava amostras intercaladas da geração `generation`.
     ///
-    /// Limpa o ring: nenhuma amostra da geração anterior pode ser apresentada.
-    pub fn start_generation(&mut self, generation: Generation) {
-        self.generation = generation;
-        self.state = PipelineState::Playing;
-        self.reset_ring();
-        self.remaining_frames = 0;
-        self.content_frames = 0;
-        self.content_presented = 0;
-        self.eof = false;
-    }
-
-    /// Produtor: empurra amostras intercaladas (frames = samples / channels).
-    ///
-    /// Falha com [`PipelineError::RingFull`] se a capacidade for excedida.
-    pub fn push_samples(&mut self, samples: &[f32]) -> Result<(), PipelineError> {
-        self.config.validate()?;
-        let spf = self.config.samples_per_frame();
-        let frames = (samples.len() / spf) as u64;
-        let buffered_frames = ((self.ring.len() - self.head) / spf) as u64;
-        // Capacity is enforced only when the ring is already full; a single
-        // large push (test fixture) is accepted by compacting first.
-        if buffered_frames + frames > self.config.ring_capacity_frames as u64
-            && buffered_frames >= self.config.ring_capacity_frames as u64
-        {
-            return Err(PipelineError::RingFull);
+    /// - geração que não é a vigente: `Ok(Stale)`, nada é gravado;
+    /// - tamanho que não é múltiplo de `channels`: erro, nada é gravado;
+    /// - mais frames do que cabe: erro, **sem escrita parcial**;
+    /// - gravar depois do EOF da mesma geração: erro.
+    pub fn push(&mut self, generation: Generation, samples: &[f32]) -> Result<PushOutcome, Error> {
+        let shared = &self.shared;
+        let channels = shared.channels();
+        if !samples.len().is_multiple_of(channels) {
+            return Err(Error::InvalidArgument("samples nao multiplo de channels"));
         }
-        // Compacta antes de crescer.
-        if self.head > 0 {
-            self.ring.drain(..self.head);
-            self.head = 0;
+        if !shared.gate.admits(generation) {
+            return Ok(PushOutcome::Stale);
         }
-        self.ring.extend_from_slice(samples);
-        self.remaining_frames = self.remaining_frames.saturating_sub(frames);
-        Ok(())
-    }
-
-    /// Produtor: declara o total de frames de conteúdo da geração.
-    ///
-    /// Serve ao oráculo e ao drain: `presented == content_frames` é a condição
-    /// de fim. Também é o alvo citado por `content_frames`.
-    pub fn declare_content(&mut self, frames: u64) {
-        self.content_frames = frames;
-    }
-
-    /// Produtor: grava a marca de EOF **depois** do último frame.
-    pub fn push_eof(&mut self) {
-        self.eof = true;
-        if self.content_frames == 0 {
-            // Sem declaração explícita: o conteúdo é o que já entrou no ring.
-            self.content_frames = self.content_presented + self.buffered_frames();
+        let tag = generation.value();
+        let same = shared.tag.load(Ordering::Relaxed) == tag;
+        if same && self.eof_sent {
+            return Err(Error::InvalidArgument("push apos EOF"));
         }
+        let frames = (samples.len() / channels) as u64;
+        if frames > shared.capacity().saturating_sub(shared.buffered()) {
+            return Err(Error::InvalidArgument("ring sem espaco para o push"));
+        }
+        let written = shared.written.load(Ordering::Relaxed);
+        if !same {
+            self.begin_generation(tag, written);
+        }
+        let shared = &self.shared;
+        let capacity = shared.capacity();
+        for (i, sample) in samples.iter().enumerate() {
+            let frame = written + (i / channels) as u64;
+            let slot = (frame % capacity) as usize * channels + i % channels;
+            shared.data[slot].store(sample.to_bits(), Ordering::Relaxed);
+        }
+        shared.written.store(written + frames, Ordering::Release);
+        Ok(PushOutcome::Accepted)
     }
 
-    fn buffered_frames(&self) -> u64 {
-        ((self.ring.len() - self.head) / self.config.samples_per_frame().max(1)) as u64
-    }
-
-    /// Consumidor (callback): puxa até um período do ring.
+    /// Grava a marca de EOF da geração, **depois** do último frame.
     ///
-    /// Ao chegar o EOF e o ring acabar, completa o período com zeros para não
-    /// cortar o último frame nem repetir. A partir daí não avança a posição de
-    /// conteúdo: `presented_frames` só chega a `content_frames`, e continua
-    /// preenchendo silêncio até o backend parar.
-    pub fn callback(&mut self) -> Result<(), PipelineError> {
-        self.captured.clear();
-        let period = self.config.period_frames as usize;
-        let spf = self.config.samples_per_frame().max(1);
+    /// Idempotente. Geração que não é a vigente devolve `Stale`.
+    pub fn push_eof(&mut self, generation: Generation) -> PushOutcome {
+        if !self.shared.gate.admits(generation) {
+            return PushOutcome::Stale;
+        }
+        let tag = generation.value();
+        let written = self.shared.written.load(Ordering::Relaxed);
+        if self.shared.tag.load(Ordering::Relaxed) != tag {
+            // Faixa vazia: a geração começa e termina na mesma posição.
+            self.begin_generation(tag, written);
+        }
+        self.shared.eof_pos.store(written, Ordering::Release);
+        self.eof_sent = true;
+        PushOutcome::Accepted
+    }
 
-        // Quanto conteúdo há para apresentar neste período.
-        let buffered = self.buffered_frames() as usize;
-        let real_frames = buffered.min(period);
-        if real_frames > 0 {
-            let take = real_frames * spf;
-            let src_start = self.head;
-            let src_end = (src_start + take).min(self.ring.len());
-            let chunk = self.ring[src_start..src_end].to_vec();
-            // Continuação de um período que já passou por `admits`: o callback
-            // não descarta amostras por falta de dados; só descarta por geração.
-            self.captured.append(&mut chunk.clone());
-            self.all_captured.extend_from_slice(&chunk);
-            self.head = src_end;
-            self.content_presented += real_frames as u64;
-            self.presented_frames += real_frames as u64;
-            // Compensa latência reportada só se conteúdo ainda não alcançou o
-            // fim; no fim, `presented` deve alcançar `content_frames`.
-            let remaining_content = self.content_frames.saturating_sub(self.content_presented);
-            if remaining_content > 0 {
-                // `presented = consumidos - latência`, mas nunca abaixo do que
-                // já foi apresentado.
-            } else {
-                // Atraso reportado: em E01-05 a posição apresentada é o próprio
-                // consumido, e o drain é o que garante o fim, não um desconto.
+    /// Publica o início de uma geração: `eof_pos`, `gen_start` e só então a
+    /// etiqueta, para o consumidor que vê a etiqueta ver o resto.
+    fn begin_generation(&mut self, tag: u64, written: u64) {
+        let shared = &self.shared;
+        shared.eof_pos.store(NO_EOF, Ordering::Relaxed);
+        shared.gen_start.store(written, Ordering::Relaxed);
+        shared.tag.store(tag, Ordering::Release);
+        self.eof_sent = false;
+    }
+}
+
+/// Lado consumidor: a callback do output.
+pub struct Consumer {
+    shared: Arc<Shared>,
+    /// Geração vigente vista no último callback.
+    generation: u64,
+    /// `true` depois de pular o que veio antes de `gen_start`.
+    armed: bool,
+    /// Frames entregues ao device nesta geração, silêncio incluído.
+    output_frames: u64,
+    content_read: u64,
+    presented: u64,
+}
+
+impl Consumer {
+    /// Preenche `out` (amostras intercaladas) e devolve os frames de conteúdo
+    /// copiados. O resto do buffer, inclusive qualquer sobra que não complete
+    /// um frame, é zerado.
+    ///
+    /// Tempo real: sem alocação, lock, I/O nem log. Só loads e stores atômicos
+    /// e escrita em `out`.
+    pub fn callback(&mut self, out: &mut [f32]) -> usize {
+        // RT-BEGIN
+        let shared = &*self.shared;
+        let channels = shared.channels();
+        let out_frames = out.len() / channels;
+        let current = shared.gate.current().value();
+        if current != self.generation {
+            // Geração nova: base do relógio zerada, ring ainda por armar.
+            self.generation = current;
+            self.armed = false;
+            self.output_frames = 0;
+            self.content_read = 0;
+            self.presented = 0;
+            shared.content_read.store(0, Ordering::Relaxed);
+            shared.presented.store(0, Ordering::Release);
+        }
+        out.fill(0.0);
+        if shared.paused.load(Ordering::Acquire) {
+            // Pausa: silêncio, nada é lido e o relógio não avança.
+            return 0;
+        }
+        if !self.armed && shared.tag.load(Ordering::Acquire) == current {
+            let start = shared.gen_start.load(Ordering::Relaxed);
+            let read = shared.read.load(Ordering::Relaxed);
+            if start > read {
+                // O que sobrou da geração velha é descartado, não tocado.
+                shared.read.store(start, Ordering::Release);
             }
-        } else {
-            // Ring vazio: underrun. O dispositivo recebe zeros (PIPE-REQ-04);
-            // a posição de conteúdo não avança, porque silêncio não é conteúdo.
-            let pad = period * spf;
-            self.captured.resize(self.captured.len() + pad, 0.0);
+            self.armed = true;
         }
+        let mut copied = 0usize;
+        let mut drained = false;
+        if self.armed {
+            // EOF antes do disponível: não confunde "acabou" com "atrasou".
+            let eof = shared.eof_pos.load(Ordering::Acquire);
+            let written = shared.written.load(Ordering::Acquire);
+            let read = shared.read.load(Ordering::Relaxed);
+            let available = written.saturating_sub(read);
+            copied = available.min(out_frames as u64) as usize;
+            let capacity = shared.capacity();
+            for frame in 0..copied {
+                let base = ((read + frame as u64) % capacity) as usize * channels;
+                for channel in 0..channels {
+                    out[frame * channels + channel] =
+                        f32::from_bits(shared.data[base + channel].load(Ordering::Relaxed));
+                }
+            }
+            shared.read.store(read + copied as u64, Ordering::Release);
+            drained = eof != NO_EOF && read + copied as u64 >= eof;
+        }
+        if copied < out_frames && !drained {
+            shared.underruns.fetch_add(1, Ordering::Relaxed);
+        }
+        self.output_frames += out_frames as u64;
+        self.content_read += copied as u64;
+        let delayed = self
+            .output_frames
+            .saturating_sub(u64::from(shared.config.latency_frames));
+        self.presented = self.content_read.min(self.presented.max(delayed));
+        shared
+            .content_read
+            .store(self.content_read, Ordering::Relaxed);
+        shared.presented.store(self.presented, Ordering::Release);
+        // RT-END
+        copied
+    }
+}
 
-        if self.content_presented >= self.content_frames && self.content_frames > 0 {
-            self.state = PipelineState::Idle;
-        }
-        Ok(())
+/// Handle clonável: pausa e leitura de contadores.
+#[derive(Clone)]
+pub struct PipelineControl {
+    shared: Arc<Shared>,
+}
+
+impl PipelineControl {
+    /// Pausa ou retoma o callback. Pausado, ele entrega silêncio, não consome o
+    /// ring, não avança o relógio e não conta underrun.
+    pub fn set_paused(&self, paused: bool) {
+        self.shared.paused.store(paused, Ordering::Release);
     }
 
-    /// Frames apresentados (monotônico na geração).
+    /// Verdadeiro se o callback está pausado.
+    pub fn is_paused(&self) -> bool {
+        self.shared.paused.load(Ordering::Acquire)
+    }
+
+    /// Frames apresentados na geração vigente: `min(lido, saído − latência)`,
+    /// monotônico e nunca acima do conteúdo que saiu do ring.
     pub fn presented_frames(&self) -> u64 {
-        self.presented_frames
+        self.shared.presented.load(Ordering::Acquire)
     }
 
-    /// Frames de conteúdo apresentados nesta geração.
-    pub fn content_presented(&self) -> u64 {
-        self.content_presented
+    /// Frames de conteúdo lidos do ring na geração vigente (sem silêncio).
+    pub fn content_read_frames(&self) -> u64 {
+        self.shared.content_read.load(Ordering::Relaxed)
     }
 
-    /// Frames de conteúdo declarados.
-    pub fn content_frames(&self) -> u64 {
-        self.content_frames
+    /// Callbacks que não completaram o período com conteúdo nem com EOF.
+    pub fn underruns(&self) -> u64 {
+        self.shared.underruns.load(Ordering::Relaxed)
     }
 
-    /// Último período apresentado pelo callback. Empty se nada foi apresentado.
-    pub fn last_period(&self) -> &[f32] {
-        &self.captured
-    }
-
-    /// Retorna a captura acumulada desde o último `drain_capture` e a drena.
-    pub fn captured_samples(&mut self) -> &[f32] {
-        // O teste lê a captura depois de um período; limpa para a próxima.
-        let start = self.captured.len();
-        let _ = start;
-        &self.captured
-    }
-
-    /// Frames reais de conteúdo capturados (sem os zeros de silêncio).
-    pub fn captured_real_frames(&self) -> u64 {
-        self.content_presented
-    }
-
-    /// Todas as amostras capturadas desde o início.
-    pub fn all_captured(&self) -> &[f32] {
-        &self.all_captured
-    }
-
-    /// Limpa a captura do último período.
-    pub fn clear_capture(&mut self) {
-        self.captured.clear();
-    }
-
-    /// Troca de fonte (A/B): encerra a geração atual e abre a seguinte.
-    ///
-    /// Zero o ring e os contadores da geração anterior: amostras velhas não
-    /// são apresentadas na nova geração. O conteúdo novo será empurrado pelo
-    /// harness e declarado via `push_eof`.
-    pub fn switch_source(&mut self) {
-        self.generation = Generation(self.generation.value() + 1);
-        self.reset_ring();
-        self.eof = false;
-        self.content_presented = 0;
-        self.content_frames = 0;
-    }
-
-    /// Stop: encerra a geração atual, drena o ring e volta a `Idle`.
-    pub fn stop(&mut self) {
-        self.state = PipelineState::Idle;
-        self.reset_ring();
-        self.eof = false;
-        self.content_frames = self.content_presented;
-        self.content_presented = 0;
-    }
-
-    /// Open: nova geração em `Playing` (nesta TASK sem separação Opening).
-    pub fn open(&mut self) {
-        self.generation = Generation(self.generation.value() + 1);
-        self.reset_ring();
-        self.eof = false;
-        self.content_frames = 0;
-        self.content_presented = 0;
-        self.state = PipelineState::Playing;
-    }
-
-    fn reset_ring(&mut self) {
-        self.ring.clear();
-        self.head = 0;
+    /// Frames no ring ainda não lidos nem descartados.
+    pub fn buffered_frames(&self) -> u64 {
+        self.shared.buffered()
     }
 }
