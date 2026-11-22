@@ -36,3 +36,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Domínio de reprodução: estados, comandos, eventos, geração e cancelamento.
 pub mod playback;
+
+/// Pipeline: ring SPSC, mixer, relógio apresentado, drain de EOF, trocas básicas.
+pub mod pipeline;
