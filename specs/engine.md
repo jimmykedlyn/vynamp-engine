@@ -266,7 +266,8 @@ geração.
 | ENGINE-REQ-04 | Buffer de geração velha nunca chega à saída. — planned (M1) | REQ de reprodução fiel | E01-03 | — (ENGINE-AC-04 planejado) |
 | ENGINE-REQ-05 | `Stop` é idempotente. — planned (M1) | REQ de controle de reprodução | E01-03 | — (ENGINE-AC-05 planejado) |
 | ENGINE-REQ-06 | Fim de faixa drena até o último frame de conteúdo; pause/stop não deixam áudio velho no próximo play. — planned (M1) | REQ de reprodução fiel | E01-05 | — (ENGINE-AC-06, ENGINE-AC-07 planejados) |
-| ENGINE-REQ-07 | Volume padrão 1.0 e nunca acima disso; A/B entre fontes iguais não deriva. — planned (M1) | REQ de reprodução fiel | E01-05 | — (ENGINE-AC-08 planejado) |
+| ENGINE-REQ-07 | A/B entre fontes iguais não deriva e encerra ao trocar fonte. — planned (M1) | REQ de reprodução fiel | E01-05 | — (ENGINE-AC-08 planejado) |
+| ENGINE-REQ-07b | Volume padrão 1.0 e nunca acima disso. — planned (M1) | REQ de reprodução fiel | E01-15 | — (ENGINE-AC-08b planejado) |
 | ENGINE-REQ-08 | Gapless com trim de encoder delay/padding; sem metadado, emite `GaplessDegraded`. — planned (M2) | REQ de gapless e crossfade | E01-06 | — (ENGINE-AC-09 planejado) |
 | ENGINE-REQ-09 | Latência de comando: open p95 ≤ 350 ms, seek p95 ≤ 150 ms, play/pause p95 ≤ 80 ms. — planned (M3) | REQ de resposta da interface | E01-10 | — (ENGINE-AC-10 planejado) |
 | ENGINE-REQ-10 | 8 h de reprodução contínua sem underrun e sem crescimento de memória. — planned (M3) | REQ de reprodução sem falhas | E01-10 | — (ENGINE-AC-11 planejado) |
@@ -294,7 +295,8 @@ documento de requisitos do umbrella faz parte da aprovação.
 | `ENGINE-AC-05` | o engine em `Idle` após `Stop` | `Stop` é enviado mais três vezes | estado e contador de eventos não mudam (TASK-E01-03-AC-3) | `repeated_stop_is_idempotent` |
 | `ENGINE-AC-06` | faixa com número de frames que não é múltiplo do período | a reprodução chega ao EOF | o último frame de conteúdo é apresentado (TASK-E01-05) | `eof_drains_to_last_frame` |
 | `ENGINE-AC-07` | pausado com amostras no ring e decode em voo | Stop, Open de outra faixa e Play | nenhuma amostra da faixa anterior sai (TASK-E01-05) | `stop_then_play_has_no_stale_audio` |
-| `ENGINE-AC-08` | duas cópias do mesmo arquivo, volume padrão | A/B alternado por 60 s | posição e frames apresentados não derivam; nenhuma amostra excede a da fonte (TASK-E01-05) | `ab_switch_has_no_drift_and_no_gain` |
+| `ENGINE-AC-08` | duas cópias do mesmo arquivo, volume padrão | A/B alternado por 60 s | posição e frames apresentados não derivam (TASK-E01-05) | `ab_switch_has_no_drift` |
+| `ENGINE-AC-08b` | uma fonte com volume padrão | a reprodução passa pelo mixer | nenhuma amostra de saída difere da de entrada (TASK-E01-15) | `default_volume_is_bit_exact` |
 | `ENGINE-AC-09` | os pares FLAC/MP3/AAC da TASK-E01-06, incluindo `nolame-cbr128-48k.mp3` (delay 529) e FLAC com `total_samples` zerado | tocados em sequência | nos pares com metadado a junção é igual ao original; nos sem metadado sai `GaplessDegraded` | `gapless_pairs_rejoin` |
 | `ENGINE-AC-10` | o harness de latência da TASK-E01-10 | 1 000 repetições de open, seek e play/pause | os p95 ficam dentro de ENGINE-REQ-09 | `command_latency_p95` (`#[ignore]`) |
 | `ENGINE-AC-11` | FLAC 24/192 sine 997 Hz de 8 h (TASK-E01-10) | reprodução contínua | zero underruns e memória residente estável | `soak_8h` (`#[ignore]`) |

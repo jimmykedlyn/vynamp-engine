@@ -14,7 +14,7 @@
 | Fase | M1 |
 | Prioridade | P0 |
 | Estado | planned |
-| Depende de | `TASK-E01-05` |
+| Depende de | `TASK-E01-05`, `TASK-E01-15` |
 | Bloqueia | `TASK-E04-03`, `TASK-E08-03` |
 | Modelo executor | Opus — áudio/RT, concorrência, segurança ou release |
 | Esforço | 3–8 dias úteis |
