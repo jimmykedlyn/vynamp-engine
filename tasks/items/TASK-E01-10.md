@@ -12,7 +12,7 @@
 | REQ coberto | `REQ-E01-10` |
 | Critérios da spec | pendente — `specs/engine.md` §5 |
 | Fase | M3 |
-| Prioridade | P1 |
+| Prioridade | P0 |
 | Estado | planned |
 | Depende de | `TASK-E01-06`, `TASK-E01-09`, `TASK-E04-06` |
 | Bloqueia | `TASK-E10-08`, `TASK-E15-06` |

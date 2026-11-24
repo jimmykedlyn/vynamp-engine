@@ -12,7 +12,7 @@
 | REQ coberto | `REQ-E01-15` |
 | Critérios da spec | `specs/engine.md` §5 (`ENGINE-AC-16`, `ENGINE-AC-17`, `ENGINE-AC-18`) e `specs/pipeline.md` §5 (`PIPE-AC-12`) — rascunho não aprovado |
 | Fase | M1 |
-| Prioridade | P1 |
+| Prioridade | P0 |
 | Estado | planned |
 | Depende de | `TASK-E01-05` |
 | Bloqueia | `TASK-E04-01` |
