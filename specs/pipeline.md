@@ -62,7 +62,10 @@ em play e em stop. A duração `N` é 10 ms convertidos em frames na taxa do est
 mixer, arredondados para baixo: `N = ⌊taxa × 10 / 1000⌋`, ou seja, 480 frames a
 48 kHz, que é o caso do PIPE-AC-12. No play, o ganho do frame `n` contado a partir do
 play é `n / N` para `n < N` e 1 depois; no stop pedido no frame `s`, o ganho é
-`1 − (n − s) / N` para `s ≤ n < s + N` e 0 a partir de `s + N`. Com amostras
+`1 − (n − s) / N` para `s ≤ n < s + N` e 0 a partir de `s + N`. Um stop pedido durante
+a rampa de play começa a descer do ganho atual, e um play pedido durante a rampa de stop
+sobe do ganho atual; nos dois casos o ganho anda ±1/N por frame, sem descontinuidade, até
+0 ou 1. Com amostras
 normalizadas em [−1, 1], o passo da rampa é `1 / N` por frame, e nenhum degrau entre
 amostras consecutivas do mesmo canal passa do maior degrau da fonte somado a `1 / N`
 (PIPE-REQ-12, PIPE-AC-12; TASK-E01-15).
@@ -247,7 +250,7 @@ Os rótulos da coluna “REQ de produto” são descritivos; o ID de produto cor
 | `PIPE-AC-09` | sinal com picos inter-sample acima de 0 dBTP | passa pelo guard | o true-peak medido (oversampling 4×) é ≤ −1 dBTP | `true_peak_guard_holds` |
 | `PIPE-AC-10` | fonte 44,1 kHz e dispositivo 48 kHz com DSP ativo | monta-se a cadeia | há exatamente um estágio `Resampler` | `single_resampler` |
 | `PIPE-AC-11` | perfil de referência, `VYNAMP_SOAK_FIXTURE` definido | toca-se 8 h | zero underruns e callback p99,9 < 25% do período | `soak_8h` (ignore) |
-| `PIPE-AC-12` | cosseno de amplitude 1,0 a 1 kHz e 48 kHz, começando na fase 0 (x₀ = 1), amostras normalizadas em [−1, 1]; stop pedido no frame 4800 (um pico) | play no frame 0 e stop no frame 4800 | a primeira amostra de saída é 0; do frame 480 ao 4799 a saída é igual à entrada; a partir do frame 4800 + 480 a saída é 0; nenhum degrau entre amostras consecutivas do mesmo canal passa de 2·sin(π/48) + 1/480 | `play_stop_ramp_has_no_step` |
+| `PIPE-AC-12` | cosseno de amplitude 1,0 a 1 kHz e 48 kHz, começando na fase 0 (x₀ = 1), amostras normalizadas em [−1, 1]; stop pedido no frame 4800 (um pico) | play no frame 0 e stop no frame 4800 | a primeira amostra de saída é 0; do frame 480 ao 4799 a saída é igual à entrada; a partir do frame 4800 + 480 a saída é 0; nenhum degrau entre amostras consecutivas do mesmo canal passa de 2·sin(π/48) + 1/480; e `y[240] == x[240] / 2` | `play_stop_ramp_has_no_step` |
 
 **Nenhum destes testes existe ainda.** O nome é o compromisso; a TASK citada em §4 é
 quem os cria.

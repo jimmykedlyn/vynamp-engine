@@ -211,7 +211,7 @@ registrado na coluna "Onde é provado".
 - Resampling e dither: são de E04-02.
 - ReplayGain e LUFS: são de `equalizadores.md` (E04-01) e E08-03.
 - Os medidores na UI e a velocidade por categoria: são de E06-05 e E08-09.
-- O drenar da cauda é de E01-05 e a rampa em stop/seek é de E01-15 (`pipeline.md`).
+- O drenar da cauda é de E01-05 e a rampa de play/stop é de E01-15 (`pipeline.md`).
 - A ausência de clique na troca: smoothing e crossfade são de `dsp.md` (NODE-AC-02 e
   NODE-AC-06).
 

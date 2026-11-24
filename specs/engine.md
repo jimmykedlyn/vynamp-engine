@@ -304,9 +304,9 @@ documento de requisitos do umbrella faz parte da aprovação.
 | `ENGINE-AC-13` | fila de 40 jobs com crash no 12; um cancelamento; 30 jobs com 4 falhas distintas (TASK-E08-01) | a fila roda | retoma do checkpoint; cancelar remove o temporário e preserva a fonte; os 26 bons terminam e as 4 falhas são reportadas | `jobs_resume_cancel_and_isolate_failures` |
 | `ENGINE-AC-14` | `NullHost` do `vynamp-output` configurado para perder a rota | a perda é injetada e a rota não volta | `Reconnecting` → `DeviceLost`, sem `panic!` | `device_loss_goes_to_device_lost` |
 | `ENGINE-AC-15` | cada variante de erro de §6 provocada | a chamada falha | o engine aceita `Stop` e volta a `Idle` | `errors_are_data_and_engine_stays_usable` |
-| `ENGINE-AC-16` | sinal senoidal não nulo e volume padrão | passa pelo mixer | saída idêntica à entrada, amostra a amostra (TASK-E01-15) | `default_volume_is_bit_exact` |
-| `ENGINE-AC-17` | volume em 0,5 e o mesmo sinal não nulo | `SetVolume(2.0)` | o comando devolve `InvalidArgument`, o volume continua 0,5 e a saída é a entrada × 0,5 (TASK-E01-15) | `volume_above_unity_is_rejected` |
-| `ENGINE-AC-18` | duas streams constantes de 0,25 em todos os canais, volume padrão | o mixer soma um bloco | cada amostra de saída é 0,5 (TASK-E01-15) | `mixer_sums_streams` |
+| `ENGINE-AC-16` | sinal senoidal não nulo e volume padrão | passa pelo mixer | a partir do frame N da rampa de play (`pipeline.md` §3.1), a saída é idêntica à entrada, amostra a amostra (TASK-E01-15) | `default_volume_is_bit_exact` |
+| `ENGINE-AC-17` | volume em 0,5 e o mesmo sinal não nulo | `SetVolume(2.0)` | o comando devolve `InvalidArgument`, o volume continua 0,5 e, a partir do frame N da rampa de play (`pipeline.md` §3.1), a saída é a entrada × 0,5 (TASK-E01-15) | `volume_above_unity_is_rejected` |
+| `ENGINE-AC-18` | stream A = 0,1·(k mod 4) e stream B = 0,05 constante, por amostra k, volume padrão | o mixer soma um bloco | a partir do frame N da rampa de play (`pipeline.md` §3.1), cada amostra de saída é A[k] + B[k] (TASK-E01-15) | `mixer_sums_streams` |
 
 ### Critérios que esta spec **não** fixa
 
