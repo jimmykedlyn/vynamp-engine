@@ -57,6 +57,16 @@ O guard true-peak do passo 8 é distinto do limiter criativo da cadeia DSP (E04-
 o limiter é opcional e fica no passo 4; o guard é sempre o último processamento
 antes da quantização e só atua se houver risco de clipping inter-sample.
 
+**Rampa de play e stop.** O estágio do mixer (passo 5) aplica uma rampa linear de ganho
+em play e em stop. A duração `N` é 10 ms convertidos em frames na taxa do estágio do
+mixer, arredondados para baixo: `N = ⌊taxa × 10 / 1000⌋`, ou seja, 480 frames a
+48 kHz, que é o caso do PIPE-AC-12. No play, o ganho do frame `n` contado a partir do
+play é `n / N` para `n < N` e 1 depois; no stop pedido no frame `s`, o ganho é
+`1 − (n − s) / N` para `s ≤ n < s + N` e 0 a partir de `s + N`. Com amostras
+normalizadas em [−1, 1], o passo da rampa é `1 / N` por frame, e nenhum degrau entre
+amostras consecutivas do mesmo canal passa do maior degrau da fonte somado a `1 / N`
+(PIPE-REQ-12, PIPE-AC-12; TASK-E01-15).
+
 ```rust
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,8 +143,9 @@ impl PresentedClock {
 O cálculo roda no callback, sem alocação. `total_out` é o número de frames de saída já
 escritos no dispositivo, inclusive zeros de underrun e de dreno, na taxa de saída. A
 fila guarda pares (`fim`, `conteúdo`) e tem capacidade fixa
-`PRESENTED_QUEUE_CAPACITY = 64`; o teste instancia a mesma lógica com capacidade 2. A
-cada callback, nesta ordem:
+`PRESENTED_QUEUE_CAPACITY = 64`; a capacidade é argumento do construtor interno do
+relógio; a pipeline usa `PRESENTED_QUEUE_CAPACITY`, e o PIPE-AC-06d usa 2. A cada
+callback, nesta ordem:
 
 1. escreve o bloco (conteúdo, zeros de underrun ou zeros de dreno) e soma o tamanho do
    bloco a `total_out`;
@@ -213,7 +224,7 @@ pub enum Transition {
 | PIPE-REQ-09 | Guard true-peak final mantém a saída ≤ −1 dBTP e fica depois do resampler, antes da quantização — planned (M3) | sem clipping | E17-07 | — (PIPE-AC-09 planejado) |
 | PIPE-REQ-10 | Existe um único resampler no caminho processado — planned (M1) | qualidade de conversão | E01-05 | — (PIPE-AC-10 planejado) |
 | PIPE-REQ-11 | Callback p99,9 abaixo de 25% do período do bloco e 8 h sem underrun no perfil de referência — planned (M3) | estabilidade | E01-10 | — (PIPE-AC-11 planejado) |
-| PIPE-REQ-12 | Play e stop aplicam a rampa linear de §6, sem degrau maior que o da fonte somado ao passo da rampa — planned (M1) | áudio sem falhas | E01-15 | — (PIPE-AC-12 planejado) |
+| PIPE-REQ-12 | Play e stop aplicam a rampa linear de §3.1: a saída começa em 0, iguala a entrada depois de `N` frames, chega a 0 `N` frames depois do stop e nenhum degrau passa do maior degrau da fonte somado a `1 / N` — planned (M1) | áudio sem falhas | E01-15 | — (PIPE-AC-12 planejado) |
 
 Os rótulos da coluna “REQ de produto” são descritivos; o ID de produto correspondente
 é o da TASK citada no backlog.
@@ -236,7 +247,7 @@ Os rótulos da coluna “REQ de produto” são descritivos; o ID de produto cor
 | `PIPE-AC-09` | sinal com picos inter-sample acima de 0 dBTP | passa pelo guard | o true-peak medido (oversampling 4×) é ≤ −1 dBTP | `true_peak_guard_holds` |
 | `PIPE-AC-10` | fonte 44,1 kHz e dispositivo 48 kHz com DSP ativo | monta-se a cadeia | há exatamente um estágio `Resampler` | `single_resampler` |
 | `PIPE-AC-11` | perfil de referência, `VYNAMP_SOAK_FIXTURE` definido | toca-se 8 h | zero underruns e callback p99,9 < 25% do período | `soak_8h` (ignore) |
-| `PIPE-AC-12` | senoide de amplitude 1,0 em [−1, 1] a 1 kHz, 48 kHz; amostras normalizadas em [−1, 1] | play e depois stop | nenhum degrau entre amostras consecutivas do mesmo canal excede o maior degrau da senoide somado a 1/480 | `play_stop_ramp_has_no_step` |
+| `PIPE-AC-12` | cosseno de amplitude 1,0 a 1 kHz e 48 kHz, começando na fase 0 (x₀ = 1), amostras normalizadas em [−1, 1]; stop pedido no frame 4800 (um pico) | play no frame 0 e stop no frame 4800 | a primeira amostra de saída é 0; do frame 480 ao 4799 a saída é igual à entrada; a partir do frame 4800 + 480 a saída é 0; nenhum degrau entre amostras consecutivas do mesmo canal passa de 2·sin(π/48) + 1/480 | `play_stop_ramp_has_no_step` |
 
 **Nenhum destes testes existe ainda.** O nome é o compromisso; a TASK citada em §4 é
 quem os cria.
@@ -267,12 +278,6 @@ geram `Event::Error` uma vez por nó por geração; o resto da cadeia segue.
 (`engine.md` §3.4); o worker confere `CancelToken` entre blocos e descarta o que for
 de geração antiga. O ring é esvaziado pelo consumidor quando a marca de geração muda,
 para que nenhum frame velho seja tocado.
-
-**Rampa de play e stop.** Play e stop aplicam uma rampa linear de ganho de 480 frames da
-taxa de saída (10 ms a 48 kHz): de 0 a 1 no play, de 1 a 0 no stop. Com amostras
-normalizadas em [−1, 1], o passo da rampa é 1/480 por frame, e nenhum degrau entre
-amostras consecutivas do mesmo canal passa do maior degrau da fonte somado a 1/480
-(PIPE-REQ-12, PIPE-AC-12; TASK-E01-15).
 
 ## 7. Fora de escopo
 

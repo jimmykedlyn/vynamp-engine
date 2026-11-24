@@ -274,7 +274,8 @@ geração.
 | ENGINE-REQ-12 | Jobs retomam do último checkpoint após crash; cancelar apaga só temporários, nunca a fonte; falha de um job não para a fila. — planned (M2) | REQ de conversão e restauração em lote | E08-01 | — (ENGINE-AC-13 planejado) |
 | ENGINE-REQ-13 | Perda de dispositivo leva a `Reconnecting` e, esgotado o prazo, a `DeviceLost`, sem `panic!`. — planned (M2) | REQ de robustez | E01-05 | — (ENGINE-AC-14 planejado) |
 | ENGINE-REQ-14 | Nenhuma entrada provoca `panic!`; depois de qualquer erro de §6 a instância aceita `Stop` e volta a `Idle`. — planned (M1) | REQ de robustez | E01-03 | — (ENGINE-AC-15 planejado) |
-| ENGINE-REQ-15 | Volume padrão 1.0 e nunca acima disso. — planned (M1) | REQ de reprodução fiel | E01-15 | — (ENGINE-AC-16, ENGINE-AC-17 planejados) |
+| ENGINE-REQ-15 | Volume padrão 1.0 e nunca acima disso: `SetVolume` acima de 1.0 é recusado com `InvalidArgument` e o volume anterior fica. — planned (M1) | REQ de reprodução fiel | E01-15 | — (ENGINE-AC-16, ENGINE-AC-17 planejados) |
+| ENGINE-REQ-16 | O mixer soma as streams amostra a amostra. — planned (M1) | REQ de reprodução fiel | E01-15 | — (ENGINE-AC-18 planejado) |
 
 Os rótulos de REQ de produto são descritivos; trocar cada um pelo ID formal do
 documento de requisitos do umbrella faz parte da aprovação.
@@ -304,7 +305,8 @@ documento de requisitos do umbrella faz parte da aprovação.
 | `ENGINE-AC-14` | `NullHost` do `vynamp-output` configurado para perder a rota | a perda é injetada e a rota não volta | `Reconnecting` → `DeviceLost`, sem `panic!` | `device_loss_goes_to_device_lost` |
 | `ENGINE-AC-15` | cada variante de erro de §6 provocada | a chamada falha | o engine aceita `Stop` e volta a `Idle` | `errors_are_data_and_engine_stays_usable` |
 | `ENGINE-AC-16` | sinal senoidal não nulo e volume padrão | passa pelo mixer | saída idêntica à entrada, amostra a amostra (TASK-E01-15) | `default_volume_is_bit_exact` |
-| `ENGINE-AC-17` | o mesmo sinal e volume pedido de 2.0 | passa pelo mixer | o volume aplicado é 1.0 e a saída é idêntica à entrada (TASK-E01-15) | `volume_above_unity_is_clamped` |
+| `ENGINE-AC-17` | volume em 0,5 e o mesmo sinal não nulo | `SetVolume(2.0)` | o comando devolve `InvalidArgument`, o volume continua 0,5 e a saída é a entrada × 0,5 (TASK-E01-15) | `volume_above_unity_is_rejected` |
+| `ENGINE-AC-18` | duas streams constantes de 0,25 em todos os canais, volume padrão | o mixer soma um bloco | cada amostra de saída é 0,5 (TASK-E01-15) | `mixer_sums_streams` |
 
 ### Critérios que esta spec **não** fixa
 

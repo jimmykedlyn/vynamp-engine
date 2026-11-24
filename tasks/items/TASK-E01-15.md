@@ -10,7 +10,7 @@
 | Módulo dono | `vynamp-engine` |
 | Repo | `jimmykedlyn/vynamp-engine` |
 | REQ coberto | `REQ-E01-15` |
-| Critérios da spec | `specs/engine.md` §5 (`ENGINE-AC-16`, `ENGINE-AC-17`) e `specs/pipeline.md` §5 (`PIPE-AC-12`) — rascunho não aprovado |
+| Critérios da spec | `specs/engine.md` §5 (`ENGINE-AC-16`, `ENGINE-AC-17`, `ENGINE-AC-18`) e `specs/pipeline.md` §5 (`PIPE-AC-12`) — rascunho não aprovado |
 | Fase | M1 |
 | Prioridade | P1 |
 | Estado | planned |
@@ -45,28 +45,32 @@ Mixer PCM que soma streams e ramp de play/stop sem clique.
 | ID | Given | When | Then |
 |---|---|---|---|
 | `TASK-E01-15-AC-1` | uma fonte com volume padrão (100%) | a reprodução passa pelo mixer | Volumes default não amplificam. |
-| `TASK-E01-15-AC-2` | reprodução em curso, com a rampa de 480 frames de `specs/pipeline.md` §6 | o usuário dá play ou stop | play e stop aplicam ramp sem clique audível. |
+| `TASK-E01-15-AC-2` | cosseno de amplitude 1,0 a 1 kHz e 48 kHz, começando na fase 0 (x₀ = 1), amostras normalizadas em [−1, 1]; stop pedido no frame 4800 (um pico) | play no frame 0 e stop no frame 4800 | play e stop aplicam ramp sem clique audível. |
 
 ## Prova
 
 "Sem clique audível" é provado sobre as amostras, não por audição (`specs/pipeline.md`
-§6, `PIPE-REQ-12`, `PIPE-AC-12`, `play_stop_ramp_has_no_step`): play e stop aplicam
-rampa linear de ganho de 480 frames da taxa de saída (10 ms a 48 kHz). Com amostras
-normalizadas em [−1, 1] e uma senoide de amplitude 1,0 a 1 kHz e 48 kHz, nenhum degrau
-entre amostras consecutivas do mesmo canal excede o maior degrau da senoide somado ao
-passo da rampa, 1/480.
+§3.1, `PIPE-REQ-12`, `PIPE-AC-12`, `play_stop_ramp_has_no_step`). A rampa dura 10 ms
+convertidos em frames na taxa do estágio do mixer, arredondados para baixo: 480 frames a
+48 kHz. Com o cosseno do AC-2, a primeira amostra de saída é 0; do frame 480 ao 4799 a
+saída é igual à entrada; a partir do frame 4800 + 480 a saída é 0; e nenhum degrau entre
+amostras consecutivas do mesmo canal passa de 2·sin(π/48) + 1/480. Saída sempre zero
+reprova a segunda condição, e rampa ausente reprova a primeira e a terceira.
 
 "Volumes default não amplificam" é provado por igualdade amostra a amostra entre entrada
 e saída do mixer com volume padrão (`ENGINE-AC-16`, `default_volume_is_bit_exact`) e
-pelo teto de volume: pedido de 2.0 é aplicado como 1.0 e a saída segue idêntica à
-entrada (`ENGINE-AC-17`, `volume_above_unity_is_clamped`).
+pelo teto de volume de `specs/engine.md` §3: com o volume em 0,5, `SetVolume(2.0)`
+devolve `InvalidArgument`, o volume continua 0,5 e a saída é a entrada × 0,5
+(`ENGINE-AC-17`, `volume_above_unity_is_rejected`). A soma do mixer é provada com duas
+streams constantes de 0,25 e volume padrão: cada amostra de saída é 0,5 (`ENGINE-AC-18`,
+`mixer_sums_streams`).
 
 ## Verificação
 
 | Item | Comando / fixture | Evidência esperada |
 |---|---|---|
-| Teste automatizado | `cargo test` no repo `vynamp-engine`, com fonte de volume padrão comparada amostra a amostra (AC-1, `ENGINE-AC-16` e `ENGINE-AC-17`) e play/stop sobre a senoide de `PIPE-AC-12`, medindo o degrau máximo dentro da rampa (AC-2) | verde no CI Gate; nenhuma amostra de saída difere da entrada com volume padrão; o maior degrau medido na rampa fica dentro do limite da seção Prova |
-| Hardware | não é necessário para os critérios: o ramp é provado sobre as amostras em backend de teste; aqui não há dispositivo algum | ausência é limitação registrada, não aprovação: sem dispositivo o teste prova a forma da rampa e o ganho unitário, não a audição em dispositivo real |
+| Teste automatizado | `cargo test` no repo `vynamp-engine`, com fonte de volume padrão comparada amostra a amostra, `SetVolume(2.0)` recusado e soma de duas streams (AC-1, `ENGINE-AC-16` a `ENGINE-AC-18`) e play/stop sobre o cosseno de `PIPE-AC-12` (AC-2) | verde no CI Gate; nenhuma amostra de saída difere da entrada com volume padrão; `SetVolume(2.0)` devolve `InvalidArgument` e a saída segue a entrada × 0,5; a soma dá 0,5; a saída da rampa cumpre as quatro condições da seção Prova |
+| Hardware | não é necessário para os critérios: o ramp é provado sobre as amostras em backend de teste; aqui não há dispositivo algum | ausência é limitação registrada, não aprovação: sem dispositivo o teste prova a forma da rampa, o ganho unitário e a soma, não a audição em dispositivo real |
 
 ## DoD — pronto para review
 
