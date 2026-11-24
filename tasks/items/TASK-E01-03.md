@@ -27,8 +27,8 @@ Domain playback states, commands/events e cancellation tokens.
 ## Boundary
 
 - **Não** produz nem mistura uma única amostra. Esta TASK entrega o domínio — estados,
-  comandos, eventos e tokens de cancelamento; o ring, o mixer PCM e o dreno de EOF são
-  `TASK-E01-05`. Uma state machine verde não prova que o áudio saiu.
+  comandos, eventos e tokens de cancelamento; o ring e o dreno de EOF são `TASK-E01-05`, e
+  o mixer PCM é `TASK-E01-15`. Uma state machine verde não prova que o áudio saiu.
 - **Não** abre o dispositivo, não negocia formato e não publica o relógio. A latência e a
   posição apresentada são medidas pela callback de `vynamp-output`, fixadas no spike de
   `TASK-E01-02`; aqui só se consome o que ela informa. Sem `vynamp-output` no teste, o

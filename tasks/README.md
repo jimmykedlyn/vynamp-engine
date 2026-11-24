@@ -1,14 +1,15 @@
 # tasks — vynamp-engine
 
-15 tarefa(s) do backlog com este repositório como dono.
+16 tarefa(s) do backlog com este repositório como dono.
 Todas de produto; as de engenharia moram no umbrella.
 
 | ID | Título | Módulo dono | Estado |
 |---|---|---|---|
 | `TASK-E01-03` | Implementar state machine e generation cancellation | vynamp-engine | planned |
-| `TASK-E01-05` | Implementar mixer, drain e transições básicas | vynamp-engine | planned |
+| `TASK-E01-05` | Implementar drain, relógio de saída e A/B loop | vynamp-engine | planned |
 | `TASK-E01-06` | Implementar gapless sample-accurate | vynamp-engine | planned |
 | `TASK-E01-10` | Endurecer engine e documentação dos limites | vynamp-engine | planned |
+| `TASK-E01-15` | Implementar mixer PCM e ramp de play/stop | vynamp-engine | planned |
 | `TASK-E04-01` | Implementar EQ10, ganho e ReplayGain playback | vynamp-engine | planned |
 | `TASK-E04-03` | Construir grafo DSP e transições sem glitches | vynamp-engine | planned |
 | `TASK-E04-04` | Entregar EQ paramétrico e presets | vynamp-engine | planned |
