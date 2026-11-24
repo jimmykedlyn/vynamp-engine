@@ -267,7 +267,6 @@ geração.
 | ENGINE-REQ-05 | `Stop` é idempotente. — planned (M1) | REQ de controle de reprodução | E01-03 | — (ENGINE-AC-05 planejado) |
 | ENGINE-REQ-06 | Fim de faixa drena até o último frame de conteúdo; pause/stop não deixam áudio velho no próximo play. — planned (M1) | REQ de reprodução fiel | E01-05 | — (ENGINE-AC-06, ENGINE-AC-07 planejados) |
 | ENGINE-REQ-07 | A/B entre fontes iguais não deriva e encerra ao trocar fonte. — planned (M1) | REQ de reprodução fiel | E01-05 | — (ENGINE-AC-08 planejado) |
-| ENGINE-REQ-07b | Volume padrão 1.0 e nunca acima disso. — planned (M1) | REQ de reprodução fiel | E01-15 | — (ENGINE-AC-08b planejado) |
 | ENGINE-REQ-08 | Gapless com trim de encoder delay/padding; sem metadado, emite `GaplessDegraded`. — planned (M2) | REQ de gapless e crossfade | E01-06 | — (ENGINE-AC-09 planejado) |
 | ENGINE-REQ-09 | Latência de comando: open p95 ≤ 350 ms, seek p95 ≤ 150 ms, play/pause p95 ≤ 80 ms. — planned (M3) | REQ de resposta da interface | E01-10 | — (ENGINE-AC-10 planejado) |
 | ENGINE-REQ-10 | 8 h de reprodução contínua sem underrun e sem crescimento de memória. — planned (M3) | REQ de reprodução sem falhas | E01-10 | — (ENGINE-AC-11 planejado) |
@@ -275,6 +274,7 @@ geração.
 | ENGINE-REQ-12 | Jobs retomam do último checkpoint após crash; cancelar apaga só temporários, nunca a fonte; falha de um job não para a fila. — planned (M2) | REQ de conversão e restauração em lote | E08-01 | — (ENGINE-AC-13 planejado) |
 | ENGINE-REQ-13 | Perda de dispositivo leva a `Reconnecting` e, esgotado o prazo, a `DeviceLost`, sem `panic!`. — planned (M2) | REQ de robustez | E01-05 | — (ENGINE-AC-14 planejado) |
 | ENGINE-REQ-14 | Nenhuma entrada provoca `panic!`; depois de qualquer erro de §6 a instância aceita `Stop` e volta a `Idle`. — planned (M1) | REQ de robustez | E01-03 | — (ENGINE-AC-15 planejado) |
+| ENGINE-REQ-15 | Volume padrão 1.0 e nunca acima disso. — planned (M1) | REQ de reprodução fiel | E01-15 | — (ENGINE-AC-16, ENGINE-AC-17 planejados) |
 
 Os rótulos de REQ de produto são descritivos; trocar cada um pelo ID formal do
 documento de requisitos do umbrella faz parte da aprovação.
@@ -296,7 +296,6 @@ documento de requisitos do umbrella faz parte da aprovação.
 | `ENGINE-AC-06` | faixa com número de frames que não é múltiplo do período | a reprodução chega ao EOF | o último frame de conteúdo é apresentado (TASK-E01-05) | `eof_drains_to_last_frame` |
 | `ENGINE-AC-07` | pausado com amostras no ring e decode em voo | Stop, Open de outra faixa e Play | nenhuma amostra da faixa anterior sai (TASK-E01-05) | `stop_then_play_has_no_stale_audio` |
 | `ENGINE-AC-08` | duas cópias do mesmo arquivo, volume padrão | A/B alternado por 60 s | posição e frames apresentados não derivam (TASK-E01-05) | `ab_switch_has_no_drift` |
-| `ENGINE-AC-08b` | uma fonte com volume padrão | a reprodução passa pelo mixer | nenhuma amostra de saída difere da de entrada (TASK-E01-15) | `default_volume_is_bit_exact` |
 | `ENGINE-AC-09` | os pares FLAC/MP3/AAC da TASK-E01-06, incluindo `nolame-cbr128-48k.mp3` (delay 529) e FLAC com `total_samples` zerado | tocados em sequência | nos pares com metadado a junção é igual ao original; nos sem metadado sai `GaplessDegraded` | `gapless_pairs_rejoin` |
 | `ENGINE-AC-10` | o harness de latência da TASK-E01-10 | 1 000 repetições de open, seek e play/pause | os p95 ficam dentro de ENGINE-REQ-09 | `command_latency_p95` (`#[ignore]`) |
 | `ENGINE-AC-11` | FLAC 24/192 sine 997 Hz de 8 h (TASK-E01-10) | reprodução contínua | zero underruns e memória residente estável | `soak_8h` (`#[ignore]`) |
@@ -304,6 +303,8 @@ documento de requisitos do umbrella faz parte da aprovação.
 | `ENGINE-AC-13` | fila de 40 jobs com crash no 12; um cancelamento; 30 jobs com 4 falhas distintas (TASK-E08-01) | a fila roda | retoma do checkpoint; cancelar remove o temporário e preserva a fonte; os 26 bons terminam e as 4 falhas são reportadas | `jobs_resume_cancel_and_isolate_failures` |
 | `ENGINE-AC-14` | `NullHost` do `vynamp-output` configurado para perder a rota | a perda é injetada e a rota não volta | `Reconnecting` → `DeviceLost`, sem `panic!` | `device_loss_goes_to_device_lost` |
 | `ENGINE-AC-15` | cada variante de erro de §6 provocada | a chamada falha | o engine aceita `Stop` e volta a `Idle` | `errors_are_data_and_engine_stays_usable` |
+| `ENGINE-AC-16` | sinal senoidal não nulo e volume padrão | passa pelo mixer | saída idêntica à entrada, amostra a amostra (TASK-E01-15) | `default_volume_is_bit_exact` |
+| `ENGINE-AC-17` | o mesmo sinal e volume pedido de 2.0 | passa pelo mixer | o volume aplicado é 1.0 e a saída é idêntica à entrada (TASK-E01-15) | `volume_above_unity_is_clamped` |
 
 ### Critérios que esta spec **não** fixa
 

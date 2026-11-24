@@ -10,7 +10,7 @@
 | Módulo dono | `vynamp-engine` |
 | Repo | `jimmykedlyn/vynamp-engine` |
 | REQ coberto | `REQ-E01-15` |
-| Critérios da spec | `specs/engine.md` §5 (`ENGINE-AC-08b`) e `specs/pipeline.md` §5 (`PIPE-AC-01`) — rascunho não aprovado |
+| Critérios da spec | `specs/engine.md` §5 (`ENGINE-AC-16`, `ENGINE-AC-17`) e `specs/pipeline.md` §5 (`PIPE-AC-12`) — rascunho não aprovado |
 | Fase | M1 |
 | Prioridade | P1 |
 | Estado | planned |
@@ -45,22 +45,27 @@ Mixer PCM que soma streams e ramp de play/stop sem clique.
 | ID | Given | When | Then |
 |---|---|---|---|
 | `TASK-E01-15-AC-1` | uma fonte com volume padrão (100%) | a reprodução passa pelo mixer | Volumes default não amplificam. |
-| `TASK-E01-15-AC-2` | reprodução em curso | o usuário dá play ou stop | play e stop aplicam ramp sem clique audível. |
+| `TASK-E01-15-AC-2` | reprodução em curso, com a rampa de 480 frames de `specs/pipeline.md` §6 | o usuário dá play ou stop | play e stop aplicam ramp sem clique audível. |
 
 ## Prova
 
-"Sem clique audível" é provado sobre as amostras, não por audição: o ramp de play e o de
-stop são rampas lineares de ganho com duração declarada em frames, e em nenhum ponto da
-rampa a diferença entre duas amostras consecutivas do mesmo canal é maior que o maior
-degrau entre amostras consecutivas da fonte somado ao passo da rampa (`1 / duração`).
-"Volumes default não amplificam" é provado por igualdade bit a bit entre entrada e saída
-do mixer com volume 1.0 (`ENGINE-AC-08b`, `default_volume_is_bit_exact`).
+"Sem clique audível" é provado sobre as amostras, não por audição (`specs/pipeline.md`
+§6, `PIPE-REQ-12`, `PIPE-AC-12`, `play_stop_ramp_has_no_step`): play e stop aplicam
+rampa linear de ganho de 480 frames da taxa de saída (10 ms a 48 kHz). Com amostras
+normalizadas em [−1, 1] e uma senoide de amplitude 1,0 a 1 kHz e 48 kHz, nenhum degrau
+entre amostras consecutivas do mesmo canal excede o maior degrau da senoide somado ao
+passo da rampa, 1/480.
+
+"Volumes default não amplificam" é provado por igualdade amostra a amostra entre entrada
+e saída do mixer com volume padrão (`ENGINE-AC-16`, `default_volume_is_bit_exact`) e
+pelo teto de volume: pedido de 2.0 é aplicado como 1.0 e a saída segue idêntica à
+entrada (`ENGINE-AC-17`, `volume_above_unity_is_clamped`).
 
 ## Verificação
 
 | Item | Comando / fixture | Evidência esperada |
 |---|---|---|
-| Teste automatizado | `cargo test` no repo `vynamp-engine`, com fonte de volume padrão comparada amostra a amostra (AC-1) e play/stop sobre fonte de amplitude conhecida, medindo o degrau máximo dentro da rampa (AC-2) | verde no CI Gate; nenhuma amostra de saída difere da entrada com volume padrão; o maior degrau medido na rampa fica dentro do limite da seção Prova |
+| Teste automatizado | `cargo test` no repo `vynamp-engine`, com fonte de volume padrão comparada amostra a amostra (AC-1, `ENGINE-AC-16` e `ENGINE-AC-17`) e play/stop sobre a senoide de `PIPE-AC-12`, medindo o degrau máximo dentro da rampa (AC-2) | verde no CI Gate; nenhuma amostra de saída difere da entrada com volume padrão; o maior degrau medido na rampa fica dentro do limite da seção Prova |
 | Hardware | não é necessário para os critérios: o ramp é provado sobre as amostras em backend de teste; aqui não há dispositivo algum | ausência é limitação registrada, não aprovação: sem dispositivo o teste prova a forma da rampa e o ganho unitário, não a audição em dispositivo real |
 
 ## DoD — pronto para review
