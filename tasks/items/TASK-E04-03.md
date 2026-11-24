@@ -30,7 +30,7 @@ Compiled graph, parameter interpolation, latency annotation e crossfade.
 - **Não** implementa o resampler nem decide onde ele senta na cadeia. A lib própria de resampling, o packing PCM24/32 e a qualidade de aliasing são `TASK-E04-02`; aqui só existe a anotação de latência que o nó do resampler declara quando ele existir.
 - **Não** é a proteção final true-peak. O teto fixo depois do master e antes da quantização é `TASK-E17-07`, e o grafo não pode colocar ganho, plugin, mix ou resampling depois dele; o limiter do grafo de teste é criativo e reordenável.
 - **Não** constrói o oráculo numérico de FFT, resposta em frequência, delay/padding ou detector de descontinuidade. `TASK-E10-03` é a dona desse harness e o consome a partir daqui — o backlog a declara dependente desta TASK; implementar o detector neste repositório faria o crossfade testar a si mesmo.
-- **Não** faz o mixer de fontes, o dreno de EOF nem o ramp de play/stop. Soma de streams PCM e o último frame de conteúdo chegando ao backend são `TASK-E01-05`; o grafo troca de geração, quem garante que nada se perde no fim do stream é ela.
+- **Não** faz o mixer de fontes, o dreno de EOF nem o ramp de play/stop. Soma de streams PCM é `TASK-E01-15`; o último frame de conteúdo chegando ao backend é `TASK-E01-05`; o grafo troca de geração, quem garante que nada se perde no fim do stream é a `TASK-E01-05`.
 - **Não** integra o vitrola nem qualquer emulação analógica como nó. `TASK-E19-07` é a dona do módulo interno de vinil e válvula, e `TASK-E19-03` dissolve o desenho; aqui só existe o registro de nós e o contrato que o adaptador vai consumir.
 
 ## Antes de começar

@@ -26,7 +26,7 @@ Predecode next e trim validado de encoder delay/padding.
 
 ## Boundary
 
-- **Não** implementa o mixer, o dreno de EOF nem o ramp de play/stop. `TASK-E01-05` entrega isso e esta TASK depende dela: aqui o último frame da faixa A tem que chegar inteiro ao backend e a faixa B começar no frame seguinte, sem refazer o dreno.
+- **Não** implementa o mixer, o dreno de EOF nem o ramp de play/stop. O dreno é `TASK-E01-05`, de que esta TASK depende; mixer e ramp são `TASK-E01-15`: aqui o último frame da faixa A tem que chegar inteiro ao backend e a faixa B começar no frame seguinte, sem refazer o dreno.
 - **Não** deriva priming/preskip do container. `Track::delay`, `Track::padding` e `GaplessKind` já vêm preenchidos pelo `vynamp-decode`, e os contratos de trim, gain e timeline por codec (Opus/MP4/Matroska/Ogg) são `TASK-E17-02`; o engine só decide cortar ou não cortar com o que recebeu.
 - **Não** implementa os adapters AAC/ALAC/Vorbis/Opus. `TASK-E01-07` é dona deles: hoje `vynamp-decode` tem 9 crates e nenhum de AAC, então o par AAC do critério só passa a existir quando esse adapter existir, e inventar trim de AAC aqui seria usar metadado que ninguém parseia.
 - **Não** faz crossfade nem transição equal-power. `TASK-E04-03` é dona do grafo compilado e do crossfade de 0–12 s; a spec de `01-engine.md` §Gapless diz que gapless e crossfade são políticas mutuamente exclusivas na mesma fronteira, então escolher a política é desta TASK e executar a outra não é.

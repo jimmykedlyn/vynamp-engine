@@ -57,6 +57,19 @@ O guard true-peak do passo 8 é distinto do limiter criativo da cadeia DSP (E04-
 o limiter é opcional e fica no passo 4; o guard é sempre o último processamento
 antes da quantização e só atua se houver risco de clipping inter-sample.
 
+**Rampa de play e stop.** O estágio do mixer (passo 5) aplica uma rampa linear de ganho
+em play e em stop. A duração `N` é 10 ms convertidos em frames na taxa do estágio do
+mixer, arredondados para baixo: `N = ⌊taxa × 10 / 1000⌋`, ou seja, 480 frames a
+48 kHz, que é o caso do PIPE-AC-12. No play, o ganho do frame `n` contado a partir do
+play é `n / N` para `n < N` e 1 depois; no stop pedido no frame `s`, o ganho é
+`1 − (n − s) / N` para `s ≤ n < s + N` e 0 a partir de `s + N`. Um stop pedido durante
+a rampa de play começa a descer do ganho atual, e um play pedido durante a rampa de stop
+sobe do ganho atual; nos dois casos o ganho anda ±1/N por frame, sem descontinuidade, até
+0 ou 1. Com amostras
+normalizadas em [−1, 1], o passo da rampa é `1 / N` por frame, e nenhum degrau entre
+amostras consecutivas do mesmo canal passa do maior degrau da fonte somado a `1 / N`
+(PIPE-REQ-12, PIPE-AC-12; TASK-E01-15).
+
 ```rust
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +123,10 @@ Regras:
 - underrun: o callback preenche o restante do bloco com zeros e incrementa
   `underruns`; nunca espera;
 - EOF: o produtor grava uma marca de fim **depois** do último frame; o consumidor lê a
-  marca **antes** de medir o disponível, para não confundir “acabou” com “atrasou”.
+  marca **antes** de medir o disponível, para não confundir “acabou” com “atrasou”;
+- dreno: depois do último frame de conteúdo, o callback emite zeros até
+  `total_out ≥ fim_do_último_par + latency_frames` (pelo menos `latency_frames` zeros);
+  o dreno termina quando `presented == content_frames` (§3.3).
 
 ### 3.3 Relógio e posição apresentada
 
@@ -127,17 +143,39 @@ impl PresentedClock {
 }
 ```
 
-Cálculo, a cada callback:
+O cálculo roda no callback, sem alocação. `total_out` é o número de frames de saída já
+escritos no dispositivo, inclusive zeros de underrun e de dreno, na taxa de saída. A
+fila guarda pares (`fim`, `conteúdo`) e tem capacidade fixa
+`PRESENTED_QUEUE_CAPACITY = 64`; a capacidade é argumento do construtor interno do
+relógio; a pipeline usa `PRESENTED_QUEUE_CAPACITY`, e o PIPE-AC-06d usa 2. A cada
+callback, nesta ordem:
 
-`presented = max(presented_anterior, frames_consumidos − latency_frames)`
+1. escreve o bloco (conteúdo, zeros de underrun ou zeros de dreno) e soma o tamanho do
+   bloco a `total_out`;
+2. retira da fila, do mais antigo para o mais novo, todo par com
+   `fim + latency_frames ≤ total_out` e soma o `conteúdo` dele a `presented`;
+3. se o bloco teve conteúdo, registra o par (`fim` = `total_out`, `conteúdo` = número de
+   frames de conteúdo da geração que o bloco escreveu); se a fila já estiver cheia antes
+   de registrar, funde antes os dois pares mais antigos num só, com o conteúdo somado e
+   o `fim` do mais novo, o que só atrasa a contagem e nunca a adianta.
+
+Todas as contagens estão em frames da taxa de saída. Com o resampler final,
+`content_frames` também é contado na taxa de saída; a conversão para `MediaTime` da
+fonte acontece só em `position()`.
 
 - `latency_frames` vem do output (latência reportada do dispositivo) somada à latência
   declarada dos nós DSP ativos (`dsp.md` §3.1, `latency_frames()`);
-- o valor é monotônico dentro de uma geração; seek e `Open` iniciam geração nova e
-  zeram a base;
+- o valor é monotônico dentro de uma geração: só cresce, nunca retrocede; seek e `Open`
+  iniciam geração nova e zeram a base;
+- silêncio de underrun avança a saída total, mas não soma conteúdo;
+- chega exatamente a `content_frames` no fim da faixa, após o silêncio de dreno que
+  cobre a latência;
 - a leitura é por seqlock: o callback escreve, leitores tentam de novo se pegarem
   escrita no meio; leitor nunca bloqueia o callback;
-- erro declarado: subestima a posição real em até `latency_frames` (§10).
+- erro declarado: durante a reprodução, `presented` fica até `latency_frames` mais um
+  bloco de callback atrás do áudio que saiu (mais o atraso da fila cheia); zero após o
+  dreno da faixa (§10);
+- se `latency_frames` mudar no meio da geração, pares já somados não recuam; ver §10.
 
 ### 3.4 Transições entre faixas
 
@@ -183,12 +221,13 @@ pub enum Transition {
 | PIPE-REQ-03 | O callback não aloca, não trava mutex e não faz I/O — planned (M1) | áudio sem falhas | E01-05 | — (PIPE-AC-03 planejado) |
 | PIPE-REQ-04 | Underrun gera zeros e incrementa o contador; nunca bloqueia — planned (M1) | áudio sem falhas | E01-05 | — (PIPE-AC-04 planejado) |
 | PIPE-REQ-05 | EOF drena até o último frame; nada da faixa é cortado nem repetido — planned (M1) | reprodução completa | E01-05 | — (PIPE-AC-05 planejado) |
-| PIPE-REQ-06 | A posição apresentada é monotônica por geração e nunca passa do áudio que saiu — planned (M1) | posição confiável | E01-05 | — (PIPE-AC-06 planejado) |
+| PIPE-REQ-06 | A posição apresentada é monotônica por geração, nunca passa do áudio que saiu e chega a `content_frames` depois do dreno, salvo a limitação de mudança de latência do §10 — planned (M1) | posição confiável | E01-05 | — (PIPE-AC-06, 06b, 06c e 06d planejados) |
 | PIPE-REQ-07 | Gapless: junção sem silêncio nem clique entre faixas com mesma taxa e layout, com trim aplicado — planned (M2) | gapless | E01-06 | — (PIPE-AC-07 planejado) |
 | PIPE-REQ-08 | Crossfade equal-power com duração exata em frames; mutuamente exclusivo com gapless — planned (M2) | crossfade | E04-03 | — (PIPE-AC-08 planejado) |
 | PIPE-REQ-09 | Guard true-peak final mantém a saída ≤ −1 dBTP e fica depois do resampler, antes da quantização — planned (M3) | sem clipping | E17-07 | — (PIPE-AC-09 planejado) |
 | PIPE-REQ-10 | Existe um único resampler no caminho processado — planned (M1) | qualidade de conversão | E01-05 | — (PIPE-AC-10 planejado) |
 | PIPE-REQ-11 | Callback p99,9 abaixo de 25% do período do bloco e 8 h sem underrun no perfil de referência — planned (M3) | estabilidade | E01-10 | — (PIPE-AC-11 planejado) |
+| PIPE-REQ-12 | Play e stop aplicam a rampa linear de §3.1: a saída começa em 0, iguala a entrada depois de `N` frames, chega a 0 `N` frames depois do stop e nenhum degrau passa do maior degrau da fonte somado a `1 / N` — planned (M1) | áudio sem falhas | E01-15 | — (PIPE-AC-12 planejado) |
 
 Os rótulos da coluna “REQ de produto” são descritivos; o ID de produto correspondente
 é o da TASK citada no backlog.
@@ -202,12 +241,16 @@ Os rótulos da coluna “REQ de produto” são descritivos; o ID de produto cor
 | `PIPE-AC-03` | alocador de teste que falha ao alocar na thread do callback | toca-se 10 s | nenhuma alocação é registrada no callback | `callback_never_allocates` |
 | `PIPE-AC-04` | produtor pausado artificialmente | o callback roda 3 blocos | saem zeros, `underruns` = 3, o callback não espera | `underrun_fills_zeros` |
 | `PIPE-AC-05` | fixture de duração conhecida em frames | toca-se até o fim | frames capturados = frames da fixture após trim, último frame igual | `eof_emits_every_frame` |
-| `PIPE-AC-06` | latência simulada de 1024 frames | lê-se a posição a cada callback | a série é não decrescente e nunca excede `consumidos − 1024` | `presented_clock_is_monotonic` |
+| `PIPE-AC-06` | latência 1024, blocos de 256 frames, `content_frames` = 1000, sem underrun | lê-se `presented` ao fim de cada callback | `presented == min(1000, max(0, total_out − 1024))` em todo callback, e a série é não decrescente | `presented_tracks_output_minus_latency` |
+| `PIPE-AC-06b` | latência 1024, blocos de 256, `content_frames` = 8192; os 16 primeiros callbacks escrevem conteúdo, os 2 seguintes são underrun (512 zeros), os demais escrevem o resto | lê-se `presented` ao fim de cada callback até o fim do conteúdo | `presented == max(0, total_out − 1024)` enquanto `total_out ≤ 5120`; `presented == 4096` para 5120 ≤ `total_out` ≤ 5632; `presented == min(8192, total_out − 1536)` depois (ex.: 4352 em `total_out` = 5888; uma implementação que conta o silêncio dá 4608 em 5632) | `presented_ignores_underrun_silence` |
+| `PIPE-AC-06c` | latência 1024, blocos de 256, `content_frames` = 1000 | a faixa chega ao EOF e o dreno termina | `presented == 1000`, o dreno termina em `total_out` = 2048 e foram emitidos pelo menos 1024 zeros depois do último frame de conteúdo | `presented_reaches_content_frames_after_drain` |
+| `PIPE-AC-06d` | latência 1024, blocos de 256, fila com capacidade 2, `content_frames` = 2560 (10 callbacks de conteúdo) seguidos de dreno | lê-se `presented` ao fim de cada callback | `presented == 0` até `total_out` = 3072; `presented == 2304` em 3328; `presented == 2560` em 3584, quando o dreno termina; nunca excede `max(0, total_out − 1024)` | `presented_full_queue_never_overestimates` |
 | `PIPE-AC-07` | par de fixtures gapless com delay/padding conhecidos | toca-se a sequência | a junção concatenada é igual à referência sem amostras extras | `gapless_join_matches_reference` |
 | `PIPE-AC-08` | duas faixas a 48 kHz e crossfade de 0,5 s | ocorre a transição | a região dura 24 000 frames e a soma de potências fica em 1 ± 0,01 | `crossfade_is_equal_power` |
 | `PIPE-AC-09` | sinal com picos inter-sample acima de 0 dBTP | passa pelo guard | o true-peak medido (oversampling 4×) é ≤ −1 dBTP | `true_peak_guard_holds` |
 | `PIPE-AC-10` | fonte 44,1 kHz e dispositivo 48 kHz com DSP ativo | monta-se a cadeia | há exatamente um estágio `Resampler` | `single_resampler` |
 | `PIPE-AC-11` | perfil de referência, `VYNAMP_SOAK_FIXTURE` definido | toca-se 8 h | zero underruns e callback p99,9 < 25% do período | `soak_8h` (ignore) |
+| `PIPE-AC-12` | cosseno de amplitude 1,0 a 1 kHz e 48 kHz, começando na fase 0 (x₀ = 1), amostras normalizadas em [−1, 1]; stop pedido no frame 4800 (um pico) | play no frame 0 e stop no frame 4800 | a primeira amostra de saída é 0; do frame 480 ao 4799 a saída é igual à entrada; a partir do frame 4800 + 480 a saída é 0; nenhum degrau entre amostras consecutivas do mesmo canal passa de 2·sin(π/48) + 1/480; e `y[240] == x[240] / 2` | `play_stop_ramp_has_no_step` |
 
 **Nenhum destes testes existe ainda.** O nome é o compromisso; a TASK citada em §4 é
 quem os cria.
@@ -269,7 +312,8 @@ Limitação declarada não reprova a entrega; limitação omitida reprova.
 
 | Limitação | Efeito | Quem cobre |
 |---|---|---|
-| a posição apresentada subestima a real em até `latency_frames` | barra de progresso até ~20 ms atrás em dispositivos típicos | aceito; documentado na UI |
+| durante a reprodução a posição apresentada fica atrás do áudio que saiu em até `latency_frames` (mais o atraso da fila cheia, §3.3); após o dreno, é exata | barra de progresso até ~20 ms atrás em dispositivos típicos | aceito; documentado na UI |
+| mudança de `latency_frames` no meio da geração (ativar nó DSP com latência) pode fazer `presented` adiantar até o aumento de latência, porque pares já somados não recuam | posição até alguns ms adiantada logo após a troca | aceito; a próxima geração (seek/Open) zera a base |
 | gapless entre faixas com taxa ou layout diferentes pode degradar | `Event::GaplessDegraded` e possível clique curto | E01-06 |
 | modo transparente desliga EQ, volume e guard | o volume tem de ser feito no dispositivo/sistema | aceito por definição |
 | a latência reportada pelo backend pode estar errada | posição e A/V desalinham pelo erro do driver | `vynamp-output` `backends.md` |
