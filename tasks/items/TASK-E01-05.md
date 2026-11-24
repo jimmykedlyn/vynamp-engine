@@ -1,4 +1,4 @@
-# TASK-E01-05 — Implementar mixer, drain e transições básicas
+# TASK-E01-05 — Implementar drain, relógio de saída e A/B loop
 
 > Gerado pelo passo 37 a partir de `tasks/backlog.json`. Os campos de estado vêm do
 > backlog e não devem ser editados aqui. A coluna `Then` é o requisito aprovado,
@@ -14,7 +14,7 @@
 | Fase | M1 |
 | Prioridade | P1 |
 | Estado | planned |
-| Depende de | `TASK-E01-04` |
+| Depende de | `TASK-E01-04`, `TASK-E01-15` |
 | Bloqueia | `TASK-E01-06`, `TASK-E04-01`, `TASK-E06-05`, `TASK-E10-07`, `TASK-E13-03` |
 | Modelo executor | Opus — áudio/RT, concorrência, segurança ou release |
 | Esforço | 3–8 dias úteis |
@@ -22,13 +22,13 @@
 
 ## Entrega
 
-Mixer PCM, EOF drain, ramp play/stop e relógio de saída.
+EOF drain, relógio de saída (`presented`) e A/B loop.
 
 ## Boundary
 
-- **Não** implementa o grafo DSP nem crossfade de efeitos. O mixer aqui soma streams
-  PCM e faz ramp de play/stop; `Compiled graph`, interpolação de parâmetro e crossfade
-  equal-power entre cadeias são `TASK-E04-03`.
+- **Não** implementa o mixer PCM nem o ramp de play/stop: ficam para a `TASK-E01-15`.
+  Grafo DSP (`Compiled graph`, interpolação de parâmetro, crossfade equal-power entre
+  cadeias) é `TASK-E04-03`.
 - **Não** faz gapless sample-accurate. O dreno de EOF garante que o último frame de
   conteúdo chega ao dispositivo; predecode da próxima faixa e trim de encoder
   delay/padding são `TASK-E01-06`. Drenar sem corte não é emendar duas faixas.
